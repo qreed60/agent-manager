@@ -1,0 +1,45 @@
+{
+  "model": "openai/qwen3.6_35b_a3b_openhands",
+  "base_url": "http://192.168.5.5:1234/v1",
+  "api_key": "<local-or-redacted>",
+  "aws_access_key_id": "<redacted-or-null>",
+  "aws_secret_access_key": "<redacted-or-null>",
+  "aws_session_token": "<redacted-or-null>",
+  "max_input_tokens": 131072,
+  "max_message_chars": 30000,
+  "caching_prompt": true,
+  "prompt_cache_retention": "24h",
+  "native_tool_calling": true,
+  "reasoning_effort": "high",
+  "enable_encrypted_reasoning": true,
+  "extended_thinking_budget": 200000,
+  "litellm_extra_body": {
+    "chat_template_kwargs": {
+      "enable_thinking": true,
+      "preserve_thinking": true
+    }
+  },
+  "stream": false,
+  "tool_concurrency_limit": 1,
+  "system_prompt_filename": "system_prompt.j2",
+  "security_policy_filename": "security_policy.j2",
+  "system_prompt_kwargs": {
+    "cli_mode": true,
+    "llm_security_analyzer": true
+  },
+  "condenser": {
+    "kind": "LLMSummarizingCondenser",
+    "max_size": 80,
+    "keep_first": 4
+  },
+  "tools": [
+    "terminal",
+    "file_editor",
+    "task_tracker",
+    "task_tool_set"
+  ],
+  "include_default_tools": [
+    "FinishTool",
+    "ThinkTool"
+  ]
+}
