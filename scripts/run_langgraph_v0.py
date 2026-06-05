@@ -20,6 +20,7 @@ NODE_ORDER = [
     "write_morning_report",
     "validate_agent_run",
     "run_readonly_review_agents",
+    "compile_model_routing_plan",
     "finalize",
 ]
 
@@ -400,6 +401,21 @@ def build_graph() -> Any:
                 latest_artifact(state["project_id"], "latest_langgraph_v0"),
             ],
             produces=["latest_review_agents"],
+        ),
+    )
+    graph.add_node(
+        "compile_model_routing_plan",
+        make_command_node(
+            "compile_model_routing_plan",
+            "scripts/compile_model_routing_plan.py",
+            reads=lambda state: [
+                state.get("artifacts", {}).get("project_config", ""),
+                state.get("artifacts", {}).get("latest_runner_v0", ""),
+                state.get("artifacts", {}).get("latest_manager_plan", ""),
+                state.get("artifacts", {}).get("latest_validation", ""),
+                state.get("artifacts", {}).get("latest_review_agents", ""),
+            ],
+            produces=["latest_model_routing"],
         ),
     )
     graph.add_node("finalize", node_finalize)

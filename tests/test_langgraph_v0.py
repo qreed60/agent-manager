@@ -55,6 +55,7 @@ class LangGraphV0HelperTests(unittest.TestCase):
                 "write_morning_report",
                 "validate_agent_run",
                 "run_readonly_review_agents",
+                "compile_model_routing_plan",
                 "finalize",
             ],
         )
