@@ -17,7 +17,7 @@ PROJECT_PATTERNS = [
     "agent-manager-project-state",
 ]
 GENERATED_OBJECTIVE_PATTERNS = ["review_phase11_morning_report"]
-PHASE_PREFIXES = ("phase9_", "phase10_", "phase11_", "phase12_")
+PHASE_PREFIXES = ("phase9_", "phase10_", "phase11_", "phase12_", "phase13_")
 CATEGORIES = [
     "allowed_project_config",
     "allowed_project_adapter",
@@ -69,7 +69,7 @@ def classify(path: Path, patterns: list[str], line_text: str) -> str:
     if rel in {"scripts/audit_portability.py", "tests/test_portability.py"}:
         return "allowed_phase_label"
 
-    if any(pattern.startswith("phase9_") or pattern.startswith("phase10_") or pattern.startswith("phase11_") for pattern in patterns):
+    if any(pattern.startswith(PHASE_PREFIXES) for pattern in patterns):
         return "allowed_phase_label"
 
     if "review_phase11_morning_report" in patterns:

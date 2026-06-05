@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Read-only review agent report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "agent",
+    "project_id",
+    "created_utc",
+    "run_dir",
+    "status",
+    "blocking",
+    "findings",
+    "artifacts_reviewed",
+    "generated_by"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "agent": {
+      "enum": [
+        "validation_review",
+        "sqa_review",
+        "security_review",
+        "review_agents_summary"
+      ]
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+    },
+    "run_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "warn",
+        "fail"
+      ]
+    },
+    "blocking": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "severity",
+          "source",
+          "message"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "details": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "artifacts_reviewed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "generated_by": {
+      "const": "deterministic_scaffold"
+    }
+  }
+}
