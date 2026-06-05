@@ -3,9 +3,14 @@
   "sources": {
     "openhands_agent_prompts": {
       "name": "OpenHands Agent Prompt Project",
-      "repo_path": "/mnt/projects/openhands-agent-prompts/prompts/profiles",
+      "repo_path": "/mnt/projects/openhands-agent-prompts",
       "purpose": "Source project for OpenHands system prompts, agent settings, security policies, and profile templates.",
-      "enabled": true
+      "enabled": true,
+      "marker_files": [
+        "prompts/profiles/qwen3_6_agentic_development.j2",
+        "config/openhands_agent_settings.example.json",
+        "scripts/apply_openhands_agent_settings.sh"
+      ]
     }
   }
 }
