@@ -3,7 +3,7 @@
   "projects": {
     "thomsonlint": {
       "name": "ThomsonLint",
-      "repo_path": "/home/qreed/projects/ThomsonLint",
+      "repo_path": "/mnt/projects/ThomsonLint",
       "project_type": "python_repo",
       "state_mode": "hybrid",
       "project_state_dir": ".agent_manager",
@@ -15,7 +15,8 @@
       "notes": [
         "ThomsonLint is the first target project, not the home of the reusable framework.",
         "Generated run state belongs under server_state_dir.",
-        "Project-specific durable intent may later be stored in the repo-local project_state_dir."
+        "Project-specific durable intent may later be stored in the repo-local project_state_dir.",
+        "Repo stored on /mnt larger pool."
       ]
     }
   }
