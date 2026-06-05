@@ -19,6 +19,7 @@ NODE_ORDER = [
     "run_manager_planning_pass",
     "write_morning_report",
     "validate_agent_run",
+    "run_readonly_review_agents",
     "finalize",
 ]
 
@@ -386,6 +387,19 @@ def build_graph() -> Any:
                 state.get("artifacts", {}).get("latest_morning_report", ""),
             ],
             produces=["latest_validation"],
+        ),
+    )
+    graph.add_node(
+        "run_readonly_review_agents",
+        make_command_node(
+            "run_readonly_review_agents",
+            "scripts/run_readonly_review_agents.py",
+            reads=lambda state: [
+                state.get("artifacts", {}).get("latest_validation", ""),
+                state.get("artifacts", {}).get("latest_morning_report", ""),
+                latest_artifact(state["project_id"], "latest_langgraph_v0"),
+            ],
+            produces=["latest_review_agents"],
         ),
     )
     graph.add_node("finalize", node_finalize)

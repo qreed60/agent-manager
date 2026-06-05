@@ -23,6 +23,7 @@ The graph preserves this existing sequence:
 3. `scripts/manager_planning_pass.py <project_id>`
 4. `scripts/write_morning_report.py <project_id>`
 5. `scripts/validate_agent_run.py <project_id>`
+6. `scripts/run_readonly_review_agents.py <project_id>` in Phase 13 and later
 
 The graph nodes are:
 
@@ -32,6 +33,7 @@ The graph nodes are:
 - `run_manager_planning_pass`
 - `write_morning_report`
 - `validate_agent_run`
+- `run_readonly_review_agents` in Phase 13 and later
 - `finalize`
 
 ## Run

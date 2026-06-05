@@ -54,6 +54,7 @@ class LangGraphV0HelperTests(unittest.TestCase):
                 "run_manager_planning_pass",
                 "write_morning_report",
                 "validate_agent_run",
+                "run_readonly_review_agents",
                 "finalize",
             ],
         )

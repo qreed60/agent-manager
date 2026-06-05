@@ -301,7 +301,7 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
             )
             trace = validate_json_artifact(recorder, "langgraph_node_trace_parse", langgraph_dir / "LANGGRAPH_NODE_TRACE.json")
             validate_text_artifact(recorder, "langgraph_report_readable", langgraph_dir / "LANGGRAPH_REPORT.md")
-            expected_nodes = [
+            legacy_nodes = [
                 "load_project",
                 "collect_metrics",
                 "run_plain_runner_v0",
@@ -310,15 +310,25 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
                 "validate_agent_run",
                 "finalize",
             ]
+            expected_nodes = [
+                "load_project",
+                "collect_metrics",
+                "run_plain_runner_v0",
+                "run_manager_planning_pass",
+                "write_morning_report",
+                "validate_agent_run",
+                "run_readonly_review_agents",
+                "finalize",
+            ]
             trace_nodes = [item.get("node") for item in trace] if isinstance(trace, list) else []
-            if trace_nodes == expected_nodes:
+            if trace_nodes in (expected_nodes, legacy_nodes):
                 recorder.pass_check("langgraph_node_order", "LangGraph node trace has the expected deterministic order", path=langgraph_dir)
             else:
                 recorder.fail_check(
                     "langgraph_node_order",
                     "LangGraph node trace must match the deterministic v0 node order",
                     path=langgraph_dir / "LANGGRAPH_NODE_TRACE.json",
-                    details={"expected": expected_nodes, "actual": trace_nodes},
+                    details={"expected": expected_nodes, "legacy_allowed": legacy_nodes, "actual": trace_nodes},
                 )
             if isinstance(manifest, dict) and manifest.get("safety", {}).get("deterministic_validation_authority_preserved") is True:
                 recorder.pass_check("langgraph_preserves_validation_authority", "LangGraph manifest preserves deterministic validation authority", path=langgraph_dir)
@@ -339,7 +349,84 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
     else:
         recorder.pass_check("latest_langgraph_v0_optional", "latest_langgraph_v0 is absent; optional Phase 12 artifacts not validated", path=langgraph_pointer)
 
+    review_pointer = run_root / "latest_review_agents"
+    if review_pointer.exists() or review_pointer.is_symlink():
+        review_dir = validate_latest_dir(recorder, "latest_review_agents_dir", review_pointer)
+        if review_dir is not None:
+            resolved_dirs["latest_review_agents"] = str(review_dir)
+            validate_review_agent_artifacts(recorder, review_dir)
+    else:
+        recorder.pass_check("latest_review_agents_optional", "latest_review_agents is absent; optional Phase 13 artifacts not validated", path=review_pointer)
+
     return resolved_dirs
+
+
+def validate_review_agent_report(
+    recorder: CheckRecorder,
+    check_id: str,
+    path: Path,
+    *,
+    expected_agent: str,
+) -> dict[str, Any] | None:
+    data = validate_json_artifact(recorder, check_id, path)
+    if not isinstance(data, dict):
+        recorder.fail_check(f"{check_id}_shape", f"{path.name} must be a JSON object", path=path)
+        return None
+
+    required = {
+        "agent": expected_agent,
+        "generated_by": "deterministic_scaffold",
+    }
+    for key, expected in required.items():
+        actual = data.get(key)
+        if actual == expected:
+            recorder.pass_check(f"{check_id}_{key}", f"{path.name} {key} is {expected!r}", path=path)
+        else:
+            recorder.fail_check(f"{check_id}_{key}", f"{path.name} {key} must be {expected!r}; found {actual!r}", path=path)
+
+    status = data.get("status")
+    if status in {"pass", "warn", "fail"}:
+        recorder.pass_check(f"{check_id}_status_value", f"{path.name} status is valid", path=path)
+    else:
+        recorder.fail_check(f"{check_id}_status_value", f"{path.name} status must be pass, warn, or fail; found {status!r}", path=path)
+
+    if isinstance(data.get("blocking"), bool):
+        recorder.pass_check(f"{check_id}_blocking_bool", f"{path.name} blocking is boolean", path=path)
+    else:
+        recorder.fail_check(f"{check_id}_blocking_bool", f"{path.name} blocking must be boolean", path=path)
+
+    if isinstance(data.get("findings"), list):
+        recorder.pass_check(f"{check_id}_findings_list", f"{path.name} findings is a list", path=path)
+    else:
+        recorder.fail_check(f"{check_id}_findings_list", f"{path.name} findings must be a list", path=path)
+
+    if isinstance(data.get("artifacts_reviewed"), list):
+        recorder.pass_check(f"{check_id}_artifacts_reviewed_list", f"{path.name} artifacts_reviewed is a list", path=path)
+    else:
+        recorder.fail_check(f"{check_id}_artifacts_reviewed_list", f"{path.name} artifacts_reviewed must be a list", path=path)
+
+    return data
+
+
+def validate_review_agent_artifacts(recorder: CheckRecorder, review_dir: Path) -> None:
+    reports = [
+        ("validation_review_parse", "VALIDATION_REVIEW", "validation_review"),
+        ("sqa_review_parse", "SQA_REVIEW", "sqa_review"),
+        ("security_review_parse", "SECURITY_REVIEW", "security_review"),
+        ("review_agents_summary_parse", "REVIEW_AGENTS_SUMMARY", "review_agents_summary"),
+    ]
+    parsed: dict[str, dict[str, Any]] = {}
+    for check_id, stem, expected_agent in reports:
+        data = validate_review_agent_report(recorder, check_id, review_dir / f"{stem}.json", expected_agent=expected_agent)
+        if data is not None:
+            parsed[expected_agent] = data
+        validate_text_artifact(recorder, f"{check_id}_markdown_readable", review_dir / f"{stem}.md")
+
+    summary = parsed.get("review_agents_summary")
+    if isinstance(summary, dict) and summary.get("blocking") is False:
+        recorder.pass_check("review_agents_summary_nonblocking", "Review agents summary is nonblocking", path=review_dir / "REVIEW_AGENTS_SUMMARY.json")
+    elif isinstance(summary, dict):
+        recorder.fail_check("review_agents_summary_nonblocking", "Review agents summary must not be blocking for a valid run", path=review_dir / "REVIEW_AGENTS_SUMMARY.json")
 
 
 def build_markdown_report(report: dict[str, Any]) -> str:
@@ -355,6 +442,7 @@ def build_markdown_report(report: dict[str, Any]) -> str:
         "- No OpenHands execution: true",
         "- No model calls: true",
         "- LangGraph runtime allowed only for deterministic Phase 12 orchestration: true",
+        "- Review agents read-only: true",
         "- Target project source modified: false",
         "",
         "## Checks",
@@ -424,6 +512,7 @@ def main() -> None:
             "no_openhands_execution": True,
             "no_model_calls": True,
             "no_langgraph_runtime": True,
+            "review_agents_read_only": True,
             "target_project_source_modified": False,
         },
     }
