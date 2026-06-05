@@ -12,6 +12,11 @@ The framework owns:
 - runner/orchestration code in later phases
 - generated runs, logs, reports, and worktrees
 
+Optional orchestration dependency:
+- Phase 12 uses LangGraph for deterministic graph orchestration only.
+- Install it with `python -m pip install -U langgraph`.
+- Dependencies are not vendored in this repository.
+
 Target projects own only project-specific state, such as:
 - project safety rules
 - weekly plan
