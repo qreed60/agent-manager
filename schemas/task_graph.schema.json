@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Manager Task Graph",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "objective_id",
+    "tasks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "tasks": {
+      "type": "array"
+    }
+  }
+}

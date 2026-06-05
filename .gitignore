@@ -1,0 +1,17 @@
+# Generated run state
+runs/*
+!runs/.gitkeep
+
+# Generated worktrees
+worktrees/*
+!worktrees/.gitkeep
+
+# Temporary files
+tmp/*
+!tmp/.gitkeep
+
+# Python/cache
+__pycache__/
+*.pyc
+.venv/
+.env

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "models": {
+    "long_reasoning": {
+      "role": "manager_planner_reviewer",
+      "default_model": "openai/qwen3.6_35b_a3b_openhands",
+      "write_access": false,
+      "allowed_task_types": [
+        "weekly_planning",
+        "nightly_objective_selection",
+        "task_graph_generation",
+        "manager_review",
+        "morning_report"
+      ]
+    },
+    "coding_agent": {
+      "role": "repo_modification",
+      "default_model": "openai/qwen3.6_35b_a3b_openhands",
+      "write_access": true,
+      "activation_status": "blocked_until_phase9",
+      "allowed_task_types": [
+        "bounded_implementation"
+      ]
+    },
+    "instruct": {
+      "role": "structured_summary_and_classification",
+      "default_model": "openai/qwen3.6_35b_a3b_openhands",
+      "write_access": false,
+      "allowed_task_types": [
+        "unknown_analysis",
+        "validation_log_summary",
+        "candidate_objective_summary"
+      ]
+    },
+    "vision": {
+      "role": "visual_evidence_extraction",
+      "default_model": null,
+      "write_access": false,
+      "activation_status": "future_optional",
+      "allowed_task_types": [
+        "visual_observation"
+      ]
+    }
+  }
+}

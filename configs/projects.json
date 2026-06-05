@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "projects": {
+    "thomsonlint": {
+      "name": "ThomsonLint",
+      "repo_path": "/home/qreed/projects/ThomsonLint",
+      "project_type": "python_repo",
+      "state_mode": "hybrid",
+      "project_state_dir": ".agent_manager",
+      "server_state_dir": "runs/thomsonlint",
+      "worktree_root": "worktrees/thomsonlint",
+      "default_branch": "main",
+      "validation_adapter": "thomsonlint",
+      "enabled": true,
+      "notes": [
+        "ThomsonLint is the first target project, not the home of the reusable framework.",
+        "Generated run state belongs under server_state_dir.",
+        "Project-specific durable intent may later be stored in the repo-local project_state_dir."
+      ]
+    }
+  }
+}

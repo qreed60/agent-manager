@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "max_write_capable_tasks_per_night": 1,
+    "max_manager_passes": 3,
+    "max_retries_per_task": 1,
+    "auto_merge": false,
+    "auto_push": false,
+    "allow_main_branch_edits": false,
+    "require_isolated_worktree_for_coder": true,
+    "deterministic_validation_is_authority": true,
+    "human_approval_required_for_merge": true,
+    "human_approval_required_for_core_apply": true
+  },
+  "timebox": {
+    "timezone": "America/New_York",
+    "nightly_start": "23:00",
+    "no_new_work_cutoff": "05:30",
+    "hard_stop": "06:00"
+  }
+}
