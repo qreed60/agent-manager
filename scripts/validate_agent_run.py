@@ -413,6 +413,8 @@ def validate_review_agent_artifacts(recorder: CheckRecorder, review_dir: Path) -
         ("validation_review_parse", "VALIDATION_REVIEW", "validation_review"),
         ("sqa_review_parse", "SQA_REVIEW", "sqa_review"),
         ("security_review_parse", "SECURITY_REVIEW", "security_review"),
+        ("scalability_review_parse", "SCALABILITY_REVIEW", "scalability_review"),
+        ("architecture_review_parse", "ARCHITECTURE_REVIEW", "architecture_review"),
         ("review_agents_summary_parse", "REVIEW_AGENTS_SUMMARY", "review_agents_summary"),
     ]
     parsed: dict[str, dict[str, Any]] = {}
@@ -427,6 +429,31 @@ def validate_review_agent_artifacts(recorder: CheckRecorder, review_dir: Path) -
         recorder.pass_check("review_agents_summary_nonblocking", "Review agents summary is nonblocking", path=review_dir / "REVIEW_AGENTS_SUMMARY.json")
     elif isinstance(summary, dict):
         recorder.fail_check("review_agents_summary_nonblocking", "Review agents summary must not be blocking for a valid run", path=review_dir / "REVIEW_AGENTS_SUMMARY.json")
+
+    expected_agents = {
+        "validation_review",
+        "sqa_review",
+        "security_review",
+        "scalability_review",
+        "architecture_review",
+    }
+    if isinstance(summary, dict):
+        reports_obj = summary.get("reports")
+        actual_agents = set(reports_obj) if isinstance(reports_obj, dict) else set()
+        if expected_agents.issubset(actual_agents):
+            recorder.pass_check(
+                "review_agents_summary_all_agents",
+                "Review agents summary includes all Phase 14 reports",
+                path=review_dir / "REVIEW_AGENTS_SUMMARY.json",
+                details={"agents": sorted(actual_agents)},
+            )
+        else:
+            recorder.fail_check(
+                "review_agents_summary_all_agents",
+                "Review agents summary must include all Phase 14 reports",
+                path=review_dir / "REVIEW_AGENTS_SUMMARY.json",
+                details={"expected": sorted(expected_agents), "actual": sorted(actual_agents)},
+            )
 
 
 def build_markdown_report(report: dict[str, Any]) -> str:

@@ -23,6 +23,8 @@
         "validation_review",
         "sqa_review",
         "security_review",
+        "scalability_review",
+        "architecture_review",
         "review_agents_summary"
       ]
     },
