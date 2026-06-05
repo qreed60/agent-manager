@@ -378,7 +378,106 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
     else:
         recorder.pass_check("latest_model_routing_optional", "latest_model_routing is absent; optional Phase 15 artifacts not validated", path=model_routing_pointer)
 
+    nightly_window_pointer = run_root / "latest_nightly_window"
+    if nightly_window_pointer.exists() or nightly_window_pointer.is_symlink():
+        nightly_window_dir = validate_latest_dir(recorder, "latest_nightly_window_dir", nightly_window_pointer)
+        if nightly_window_dir is not None:
+            resolved_dirs["latest_nightly_window"] = str(nightly_window_dir)
+            validate_nightly_window_artifacts(recorder, nightly_window_dir)
+    else:
+        recorder.pass_check("latest_nightly_window_optional", "latest_nightly_window is absent; optional Phase 16 artifacts not validated", path=nightly_window_pointer)
+
     return resolved_dirs
+
+
+def validate_nightly_window_artifacts(recorder: CheckRecorder, nightly_window_dir: Path) -> None:
+    manifest = validate_json_artifact(
+        recorder,
+        "nightly_window_manifest_parse",
+        nightly_window_dir / "NIGHTLY_WINDOW_MANIFEST.json",
+        required_status="pass",
+    )
+    timeline = validate_json_artifact(recorder, "nightly_window_timeline_parse", nightly_window_dir / "NIGHTLY_WINDOW_TIMELINE.json")
+    pass_summary = validate_json_artifact(
+        recorder,
+        "nightly_pass_summary_parse",
+        nightly_window_dir / "NIGHTLY_PASS_SUMMARY.json",
+        required_status="pass",
+    )
+    safety = validate_json_artifact(
+        recorder,
+        "nightly_safety_status_parse",
+        nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json",
+        required_status="pass",
+    )
+    validate_text_artifact(recorder, "morning_handoff_readable", nightly_window_dir / "MORNING_HANDOFF.md")
+
+    if isinstance(manifest, dict):
+        required = {
+            "project_id",
+            "created_utc",
+            "selected_objective_id",
+            "policy",
+            "pass_count",
+            "max_manager_passes",
+            "max_code_writing_tasks",
+            "model_calls_allowed",
+            "openhands_allowed",
+            "source_writes_allowed",
+            "status",
+        }
+        missing = sorted(required - set(manifest))
+        if not missing:
+            recorder.pass_check("nightly_window_manifest_required_fields", "Nightly window manifest has required fields", path=nightly_window_dir / "NIGHTLY_WINDOW_MANIFEST.json")
+        else:
+            recorder.fail_check(
+                "nightly_window_manifest_required_fields",
+                "Nightly window manifest is missing required fields",
+                path=nightly_window_dir / "NIGHTLY_WINDOW_MANIFEST.json",
+                details={"missing": missing},
+            )
+        policy = manifest.get("policy")
+        if isinstance(policy, dict) and policy.get("max_code_writing_tasks") == 0 and manifest.get("max_code_writing_tasks") == 0:
+            recorder.pass_check("nightly_window_no_code_writing_tasks", "Nightly window keeps code-writing tasks disabled", path=nightly_window_dir)
+        else:
+            recorder.fail_check("nightly_window_no_code_writing_tasks", "Phase 16 requires max_code_writing_tasks == 0", path=nightly_window_dir)
+        if (
+            manifest.get("model_calls_allowed") is False
+            and manifest.get("openhands_allowed") is False
+            and manifest.get("source_writes_allowed") is False
+            and manifest.get("auto_merge_allowed") is False
+            and manifest.get("auto_push_allowed") is False
+        ):
+            recorder.pass_check("nightly_window_safety_flags", "Nightly window safety flags disable models, OpenHands, source writes, auto-merge, and auto-push", path=nightly_window_dir)
+        else:
+            recorder.fail_check("nightly_window_safety_flags", "Nightly window safety flags must disable models, OpenHands, source writes, auto-merge, and auto-push", path=nightly_window_dir)
+
+    if isinstance(timeline, dict):
+        passes = timeline.get("passes")
+        if isinstance(passes, list) and all(isinstance(item, dict) for item in passes):
+            recorder.pass_check("nightly_window_timeline_passes", "Nightly window timeline has pass entries", path=nightly_window_dir / "NIGHTLY_WINDOW_TIMELINE.json")
+        else:
+            recorder.fail_check("nightly_window_timeline_passes", "Nightly window timeline must contain a passes list", path=nightly_window_dir / "NIGHTLY_WINDOW_TIMELINE.json")
+    if isinstance(manifest, dict) and isinstance(pass_summary, dict):
+        if manifest.get("pass_count") == pass_summary.get("pass_count"):
+            recorder.pass_check("nightly_window_pass_count_consistent", "Nightly window pass counts are consistent", path=nightly_window_dir)
+        else:
+            recorder.fail_check(
+                "nightly_window_pass_count_consistent",
+                "Nightly window manifest and pass summary counts must match",
+                path=nightly_window_dir,
+                details={"manifest": manifest.get("pass_count"), "summary": pass_summary.get("pass_count")},
+            )
+    if isinstance(safety, dict):
+        if (
+            safety.get("model_calls_allowed") is False
+            and safety.get("openhands_allowed") is False
+            and safety.get("source_writes_allowed") is False
+            and safety.get("max_code_writing_tasks") == 0
+        ):
+            recorder.pass_check("nightly_safety_status_control_plane_only", "Nightly safety status preserves control-plane-only behavior", path=nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json")
+        else:
+            recorder.fail_check("nightly_safety_status_control_plane_only", "Nightly safety status must preserve control-plane-only behavior", path=nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json")
 
 
 def validate_model_routing_plan(
