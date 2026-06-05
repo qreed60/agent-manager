@@ -150,10 +150,11 @@ def build_project_state_proposal(
     updated_date = datetime.strptime(created_utc, "%Y%m%dT%H%M%SZ").date().isoformat()
 
     changes: list[dict[str, Any]] = []
+    next_objective_id = f"review_{objective_id}" if objective_id else "review_latest_morning_report"
     next_objective = {
-        "id": "review_phase11_morning_report",
-        "title": "Review Phase 11 morning report and decide whether to apply project-state changes",
-        "phase": "Phase 11 follow-up",
+        "id": next_objective_id,
+        "title": f"Review morning report for {objective_id}" if objective_id else "Review latest morning report",
+        "phase": "Morning report follow-up",
         "priority": 1,
         "status": "queued",
         "risk_level": "low",
