@@ -3,10 +3,12 @@ from __future__ import annotations
 from agent_manager.config import ProjectConfig
 from agent_manager.errors import AdapterError
 from agent_manager.adapters.base import ProjectAdapter
+from agent_manager.adapters.generic_git import GenericGitAdapter
 from agent_manager.adapters.thomsonlint import ThomsonLintAdapter
 
 
 ADAPTERS: dict[str, type[ProjectAdapter]] = {
+    "generic_git": GenericGitAdapter,
     "thomsonlint": ThomsonLintAdapter,
 }
 
