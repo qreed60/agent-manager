@@ -261,12 +261,33 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
         validate_text_artifact(recorder, "coder_prompt_readable", coder_dir / "CODER_PROMPT.md")
         validate_text_artifact(recorder, "openhands_dry_run_commands_readable", coder_dir / "OPENHANDS_DRY_RUN_COMMANDS.md")
 
+    morning_report_dir = validate_latest_dir(recorder, "latest_morning_report_dir", run_root / "latest_morning_report")
+    if morning_report_dir is not None:
+        resolved_dirs["latest_morning_report"] = str(morning_report_dir)
+        validate_text_artifact(recorder, "phase11_morning_report_readable", morning_report_dir / "MORNING_REPORT.md")
+        validate_json_artifact(
+            recorder,
+            "phase11_morning_report_json_parse",
+            morning_report_dir / "MORNING_REPORT.json",
+            required_status="pass",
+        )
+        validate_json_artifact(
+            recorder,
+            "phase11_plan_update_proposal_parse",
+            morning_report_dir / "PLAN_UPDATE_PROPOSAL.json",
+        )
+        validate_text_artifact(
+            recorder,
+            "phase11_next_objective_recommendation_readable",
+            morning_report_dir / "NEXT_OBJECTIVE_RECOMMENDATION.md",
+        )
+
     return resolved_dirs
 
 
 def build_markdown_report(report: dict[str, Any]) -> str:
     lines = [
-        "# Phase 10 Validation Report",
+        "# Agent Run Validation Report",
         "",
         f"Project: {report['project_id']}",
         f"Created UTC: {report['created_utc']}",
@@ -354,7 +375,7 @@ def main() -> None:
     (run_dir / "VALIDATION_REPORT.md").write_text(build_markdown_report(report))
     update_latest_validation(run_dir, args.project_id)
 
-    print(f"Phase 10 validation complete for {args.project_id}")
+    print(f"Agent run validation complete for {args.project_id}")
     print(f"Run dir: {run_dir}")
     print(f"Status: {report['status']}")
     if report["failures"]:
