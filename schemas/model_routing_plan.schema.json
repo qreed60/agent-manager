@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deterministic model routing plan",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "created_utc",
+    "run_dir",
+    "status",
+    "generated_by",
+    "selected_objective",
+    "role_scaffold",
+    "task_model_assignments_path",
+    "safety",
+    "safety_checks",
+    "artifacts_read"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+    },
+    "run_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "warn",
+        "fail"
+      ]
+    },
+    "generated_by": {
+      "const": "deterministic_model_routing_scaffold"
+    },
+    "selected_objective": {
+      "type": "object"
+    },
+    "role_scaffold": {
+      "type": "object"
+    },
+    "task_model_assignments_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "safety": {
+      "type": "object",
+      "required": [
+        "no_model_calls",
+        "no_openhands_execution",
+        "target_project_source_modified",
+        "no_source_writes",
+        "no_auto_merge",
+        "no_auto_push",
+        "no_permission_expansion",
+        "coding_agent_execution_enabled",
+        "deterministic_validation_authority_preserved"
+      ]
+    },
+    "safety_checks": {
+      "type": "array"
+    },
+    "artifacts_read": {
+      "type": "object"
+    }
+  }
+}

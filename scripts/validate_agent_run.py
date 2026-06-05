@@ -318,17 +318,28 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
                 "write_morning_report",
                 "validate_agent_run",
                 "run_readonly_review_agents",
+                "compile_model_routing_plan",
+                "finalize",
+            ]
+            phase13_nodes = [
+                "load_project",
+                "collect_metrics",
+                "run_plain_runner_v0",
+                "run_manager_planning_pass",
+                "write_morning_report",
+                "validate_agent_run",
+                "run_readonly_review_agents",
                 "finalize",
             ]
             trace_nodes = [item.get("node") for item in trace] if isinstance(trace, list) else []
-            if trace_nodes in (expected_nodes, legacy_nodes):
+            if trace_nodes in (expected_nodes, phase13_nodes, legacy_nodes):
                 recorder.pass_check("langgraph_node_order", "LangGraph node trace has the expected deterministic order", path=langgraph_dir)
             else:
                 recorder.fail_check(
                     "langgraph_node_order",
                     "LangGraph node trace must match the deterministic v0 node order",
                     path=langgraph_dir / "LANGGRAPH_NODE_TRACE.json",
-                    details={"expected": expected_nodes, "legacy_allowed": legacy_nodes, "actual": trace_nodes},
+                    details={"expected": expected_nodes, "phase13_allowed": phase13_nodes, "legacy_allowed": legacy_nodes, "actual": trace_nodes},
                 )
             if isinstance(manifest, dict) and manifest.get("safety", {}).get("deterministic_validation_authority_preserved") is True:
                 recorder.pass_check("langgraph_preserves_validation_authority", "LangGraph manifest preserves deterministic validation authority", path=langgraph_dir)
@@ -358,7 +369,163 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
     else:
         recorder.pass_check("latest_review_agents_optional", "latest_review_agents is absent; optional Phase 13 artifacts not validated", path=review_pointer)
 
+    model_routing_pointer = run_root / "latest_model_routing"
+    if model_routing_pointer.exists() or model_routing_pointer.is_symlink():
+        model_routing_dir = validate_latest_dir(recorder, "latest_model_routing_dir", model_routing_pointer)
+        if model_routing_dir is not None:
+            resolved_dirs["latest_model_routing"] = str(model_routing_dir)
+            validate_model_routing_artifacts(recorder, model_routing_dir)
+    else:
+        recorder.pass_check("latest_model_routing_optional", "latest_model_routing is absent; optional Phase 15 artifacts not validated", path=model_routing_pointer)
+
     return resolved_dirs
+
+
+def validate_model_routing_plan(
+    recorder: CheckRecorder,
+    check_id: str,
+    path: Path,
+) -> dict[str, Any] | None:
+    data = validate_json_artifact(recorder, check_id, path)
+    if not isinstance(data, dict):
+        recorder.fail_check(f"{check_id}_shape", f"{path.name} must be a JSON object", path=path)
+        return None
+
+    required = {
+        "schema_version": 1,
+        "generated_by": "deterministic_model_routing_scaffold",
+    }
+    for key, expected in required.items():
+        actual = data.get(key)
+        if actual == expected:
+            recorder.pass_check(f"{check_id}_{key}", f"{path.name} {key} is {expected!r}", path=path)
+        else:
+            recorder.fail_check(f"{check_id}_{key}", f"{path.name} {key} must be {expected!r}; found {actual!r}", path=path)
+
+    status = data.get("status")
+    if status in {"pass", "warn", "fail"}:
+        recorder.pass_check(f"{check_id}_status_value", f"{path.name} status is valid", path=path)
+    else:
+        recorder.fail_check(f"{check_id}_status_value", f"{path.name} status must be pass, warn, or fail; found {status!r}", path=path)
+
+    return data
+
+
+def validate_model_routing_assignments(recorder: CheckRecorder, path: Path) -> dict[str, Any] | None:
+    data = validate_model_routing_plan(recorder, "task_model_assignments_parse", path)
+    if not isinstance(data, dict):
+        return None
+
+    assignments = data.get("assignments")
+    if not isinstance(assignments, list):
+        recorder.fail_check("task_model_assignments_list", "TASK_MODEL_ASSIGNMENTS.json assignments must be a list", path=path)
+        return data
+    recorder.pass_check("task_model_assignments_list", "TASK_MODEL_ASSIGNMENTS.json assignments is a list", path=path)
+
+    write_capable = []
+    non_coding_write = []
+    non_coding_not_read_only = []
+    missing_fields = []
+    execution_violations = []
+    for item in assignments:
+        if not isinstance(item, dict):
+            missing_fields.append({"assignment": item, "missing": ["object"]})
+            continue
+        required_keys = {"role", "permission", "model_reference", "rationale"}
+        missing = sorted(required_keys - set(item))
+        if missing:
+            missing_fields.append({"assignment_id": item.get("assignment_id"), "missing": missing})
+        permission = item.get("permission")
+        if not isinstance(permission, dict):
+            missing_fields.append({"assignment_id": item.get("assignment_id"), "missing": ["permission_object"]})
+            continue
+        if permission.get("write_capable") is True:
+            write_capable.append(item)
+            if item.get("role") != "coding_agent":
+                non_coding_write.append(item)
+        if item.get("role") != "coding_agent" and permission.get("read_only") is not True:
+            non_coding_not_read_only.append(item)
+        if any(
+            permission.get(key) is True
+            for key in (
+                "execution_enabled",
+                "model_calls_enabled",
+                "openhands_execution_enabled",
+                "source_writes_enabled",
+                "auto_merge_enabled",
+                "auto_push_enabled",
+                "permission_expansion_allowed",
+            )
+        ):
+            execution_violations.append(item)
+
+    if not missing_fields:
+        recorder.pass_check("model_assignment_required_fields", "Every model assignment has required fields", path=path)
+    else:
+        recorder.fail_check("model_assignment_required_fields", "Model assignments are missing required fields", path=path, details={"missing": missing_fields})
+
+    if len(write_capable) <= 1:
+        recorder.pass_check("model_assignment_max_one_write_capable", "At most one assignment is write-capable", path=path, details={"count": len(write_capable)})
+    else:
+        recorder.fail_check("model_assignment_max_one_write_capable", "More than one assignment is write-capable", path=path, details={"count": len(write_capable)})
+
+    if not non_coding_write:
+        recorder.pass_check("model_assignment_only_coding_write_capable", "Only coding_agent can be write-capable", path=path)
+    else:
+        recorder.fail_check(
+            "model_assignment_only_coding_write_capable",
+            "A non-coding role is write-capable",
+            path=path,
+            details={"assignment_ids": [item.get("assignment_id") for item in non_coding_write]},
+        )
+
+    if not non_coding_not_read_only:
+        recorder.pass_check("model_assignment_non_coding_read_only", "Non-coding model roles are read-only", path=path)
+    else:
+        recorder.fail_check(
+            "model_assignment_non_coding_read_only",
+            "A non-coding role is not read-only",
+            path=path,
+            details={"assignment_ids": [item.get("assignment_id") for item in non_coding_not_read_only]},
+        )
+
+    if not execution_violations:
+        recorder.pass_check("model_assignment_no_execution", "Model routing assignments do not enable execution or permission expansion", path=path)
+    else:
+        recorder.fail_check(
+            "model_assignment_no_execution",
+            "One or more model routing assignments enables execution or permission expansion",
+            path=path,
+            details={"assignment_ids": [item.get("assignment_id") for item in execution_violations]},
+        )
+
+    return data
+
+
+def validate_model_routing_artifacts(recorder: CheckRecorder, model_routing_dir: Path) -> None:
+    plan = validate_model_routing_plan(recorder, "model_routing_plan_parse", model_routing_dir / "MODEL_ROUTING_PLAN.json")
+    assignments = validate_model_routing_assignments(recorder, model_routing_dir / "TASK_MODEL_ASSIGNMENTS.json")
+    summary = validate_model_routing_plan(recorder, "model_routing_summary_parse", model_routing_dir / "MODEL_ROUTING_SUMMARY.json")
+    validate_text_artifact(recorder, "model_routing_plan_markdown_readable", model_routing_dir / "MODEL_ROUTING_PLAN.md")
+    validate_text_artifact(recorder, "model_routing_summary_markdown_readable", model_routing_dir / "MODEL_ROUTING_SUMMARY.md")
+
+    if isinstance(plan, dict) and isinstance(summary, dict):
+        if plan.get("safety", {}).get("deterministic_validation_authority_preserved") is True and summary.get("deterministic_validation_authority_preserved") is True:
+            recorder.pass_check("model_routing_preserves_validation_authority", "Model routing preserves deterministic validation authority", path=model_routing_dir)
+        else:
+            recorder.fail_check("model_routing_preserves_validation_authority", "Model routing must preserve deterministic validation authority", path=model_routing_dir)
+
+    if isinstance(assignments, dict) and isinstance(summary, dict):
+        assignment_count = len(assignments.get("assignments", [])) if isinstance(assignments.get("assignments"), list) else None
+        if summary.get("assignment_count") == assignment_count:
+            recorder.pass_check("model_routing_summary_assignment_count", "Model routing summary assignment count matches assignments", path=model_routing_dir)
+        else:
+            recorder.fail_check(
+                "model_routing_summary_assignment_count",
+                "Model routing summary assignment count must match assignments",
+                path=model_routing_dir,
+                details={"summary": summary.get("assignment_count"), "assignments": assignment_count},
+            )
 
 
 def validate_review_agent_report(
