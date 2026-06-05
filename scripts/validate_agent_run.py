@@ -282,6 +282,63 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
             morning_report_dir / "NEXT_OBJECTIVE_RECOMMENDATION.md",
         )
 
+    langgraph_pointer = run_root / "latest_langgraph_v0"
+    if langgraph_pointer.exists() or langgraph_pointer.is_symlink():
+        langgraph_dir = validate_latest_dir(recorder, "latest_langgraph_v0_dir", langgraph_pointer)
+        if langgraph_dir is not None:
+            resolved_dirs["latest_langgraph_v0"] = str(langgraph_dir)
+            manifest = validate_json_artifact(
+                recorder,
+                "langgraph_manifest_parse",
+                langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
+                required_status="pass",
+            )
+            state = validate_json_artifact(
+                recorder,
+                "langgraph_state_final_parse",
+                langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
+                required_status="pass",
+            )
+            trace = validate_json_artifact(recorder, "langgraph_node_trace_parse", langgraph_dir / "LANGGRAPH_NODE_TRACE.json")
+            validate_text_artifact(recorder, "langgraph_report_readable", langgraph_dir / "LANGGRAPH_REPORT.md")
+            expected_nodes = [
+                "load_project",
+                "collect_metrics",
+                "run_plain_runner_v0",
+                "run_manager_planning_pass",
+                "write_morning_report",
+                "validate_agent_run",
+                "finalize",
+            ]
+            trace_nodes = [item.get("node") for item in trace] if isinstance(trace, list) else []
+            if trace_nodes == expected_nodes:
+                recorder.pass_check("langgraph_node_order", "LangGraph node trace has the expected deterministic order", path=langgraph_dir)
+            else:
+                recorder.fail_check(
+                    "langgraph_node_order",
+                    "LangGraph node trace must match the deterministic v0 node order",
+                    path=langgraph_dir / "LANGGRAPH_NODE_TRACE.json",
+                    details={"expected": expected_nodes, "actual": trace_nodes},
+                )
+            if isinstance(manifest, dict) and manifest.get("safety", {}).get("deterministic_validation_authority_preserved") is True:
+                recorder.pass_check("langgraph_preserves_validation_authority", "LangGraph manifest preserves deterministic validation authority", path=langgraph_dir)
+            else:
+                recorder.fail_check(
+                    "langgraph_preserves_validation_authority",
+                    "LangGraph manifest must preserve deterministic validation authority",
+                    path=langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
+                )
+            if isinstance(state, dict) and isinstance(state.get("artifacts"), dict):
+                recorder.pass_check("langgraph_state_artifact_refs", "LangGraph final state carries artifact references", path=langgraph_dir)
+            else:
+                recorder.fail_check(
+                    "langgraph_state_artifact_refs",
+                    "LangGraph final state must carry artifact references",
+                    path=langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
+                )
+    else:
+        recorder.pass_check("latest_langgraph_v0_optional", "latest_langgraph_v0 is absent; optional Phase 12 artifacts not validated", path=langgraph_pointer)
+
     return resolved_dirs
 
 
@@ -297,7 +354,7 @@ def build_markdown_report(report: dict[str, Any]) -> str:
         "",
         "- No OpenHands execution: true",
         "- No model calls: true",
-        "- No LangGraph runtime: true",
+        "- LangGraph runtime allowed only for deterministic Phase 12 orchestration: true",
         "- Target project source modified: false",
         "",
         "## Checks",

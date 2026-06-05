@@ -17,7 +17,7 @@ PROJECT_PATTERNS = [
     "agent-manager-project-state",
 ]
 GENERATED_OBJECTIVE_PATTERNS = ["review_phase11_morning_report"]
-PHASE_PREFIXES = ("phase9_", "phase10_", "phase11_")
+PHASE_PREFIXES = ("phase9_", "phase10_", "phase11_", "phase12_")
 CATEGORIES = [
     "allowed_project_config",
     "allowed_project_adapter",
