@@ -21,6 +21,7 @@ NODE_ORDER = [
     "validate_agent_run",
     "run_readonly_review_agents",
     "compile_model_routing_plan",
+    "prepare_human_approval_packet",
     "finalize",
 ]
 
@@ -416,6 +417,23 @@ def build_graph() -> Any:
                 state.get("artifacts", {}).get("latest_review_agents", ""),
             ],
             produces=["latest_model_routing"],
+        ),
+    )
+    graph.add_node(
+        "prepare_human_approval_packet",
+        make_command_node(
+            "prepare_human_approval_packet",
+            "scripts/prepare_human_approval_packet.py",
+            reads=lambda state: [
+                state.get("artifacts", {}).get("latest_runner_v0", ""),
+                state.get("artifacts", {}).get("latest_manager_plan", ""),
+                state.get("artifacts", {}).get("latest_morning_report", ""),
+                state.get("artifacts", {}).get("latest_validation", ""),
+                state.get("artifacts", {}).get("latest_review_agents", ""),
+                state.get("artifacts", {}).get("latest_model_routing", ""),
+                latest_artifact(state["project_id"], "latest_nightly_window"),
+            ],
+            produces=["latest_human_approval"],
         ),
     )
     graph.add_node("finalize", node_finalize)

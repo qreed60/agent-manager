@@ -320,6 +320,18 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
                 "validate_agent_run",
                 "run_readonly_review_agents",
                 "compile_model_routing_plan",
+                "prepare_human_approval_packet",
+                "finalize",
+            ]
+            phase15_nodes = [
+                "load_project",
+                "collect_metrics",
+                "run_plain_runner_v0",
+                "run_manager_planning_pass",
+                "write_morning_report",
+                "validate_agent_run",
+                "run_readonly_review_agents",
+                "compile_model_routing_plan",
                 "finalize",
             ]
             phase13_nodes = [
@@ -333,14 +345,20 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
                 "finalize",
             ]
             trace_nodes = [item.get("node") for item in trace] if isinstance(trace, list) else []
-            if trace_nodes in (expected_nodes, phase13_nodes, legacy_nodes):
+            if trace_nodes in (expected_nodes, phase15_nodes, phase13_nodes, legacy_nodes):
                 recorder.pass_check("langgraph_node_order", "LangGraph node trace has the expected deterministic order", path=langgraph_dir)
             else:
                 recorder.fail_check(
                     "langgraph_node_order",
                     "LangGraph node trace must match the deterministic v0 node order",
                     path=langgraph_dir / "LANGGRAPH_NODE_TRACE.json",
-                    details={"expected": expected_nodes, "phase13_allowed": phase13_nodes, "legacy_allowed": legacy_nodes, "actual": trace_nodes},
+                    details={
+                        "expected": expected_nodes,
+                        "phase15_allowed": phase15_nodes,
+                        "phase13_allowed": phase13_nodes,
+                        "legacy_allowed": legacy_nodes,
+                        "actual": trace_nodes,
+                    },
                 )
             if isinstance(manifest, dict) and manifest.get("safety", {}).get("deterministic_validation_authority_preserved") is True:
                 recorder.pass_check("langgraph_preserves_validation_authority", "LangGraph manifest preserves deterministic validation authority", path=langgraph_dir)
@@ -388,7 +406,119 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
     else:
         recorder.pass_check("latest_nightly_window_optional", "latest_nightly_window is absent; optional Phase 16 artifacts not validated", path=nightly_window_pointer)
 
+    human_approval_pointer = run_root / "latest_human_approval"
+    if human_approval_pointer.exists() or human_approval_pointer.is_symlink():
+        human_approval_dir = validate_latest_dir(recorder, "latest_human_approval_dir", human_approval_pointer)
+        if human_approval_dir is not None:
+            resolved_dirs["latest_human_approval"] = str(human_approval_dir)
+            validate_human_approval_artifacts(recorder, human_approval_dir)
+    else:
+        recorder.pass_check("latest_human_approval_optional", "latest_human_approval is absent; optional Phase 17 artifacts not validated", path=human_approval_pointer)
+
     return resolved_dirs
+
+
+def validate_human_approval_artifacts(recorder: CheckRecorder, approval_dir: Path) -> None:
+    packet = validate_json_artifact(recorder, "approval_packet_parse", approval_dir / "APPROVAL_PACKET.json")
+    summary = validate_json_artifact(
+        recorder,
+        "approval_summary_parse",
+        approval_dir / "APPROVAL_SUMMARY.json",
+        required_status="pass",
+    )
+    decision = validate_json_artifact(recorder, "human_decision_template_parse", approval_dir / "HUMAN_DECISION_TEMPLATE.json")
+    validate_text_artifact(recorder, "approval_packet_markdown_readable", approval_dir / "APPROVAL_PACKET.md")
+    validate_text_artifact(recorder, "draft_pr_plan_readable", approval_dir / "DRAFT_PR_PLAN.md")
+    validate_text_artifact(recorder, "pr_body_draft_readable", approval_dir / "PR_BODY_DRAFT.md")
+    validate_text_artifact(recorder, "resume_instructions_readable", approval_dir / "RESUME_INSTRUCTIONS.md")
+    validate_text_artifact(recorder, "approval_summary_markdown_readable", approval_dir / "APPROVAL_SUMMARY.md")
+
+    if isinstance(packet, dict):
+        required = {
+            "schema_version",
+            "project_id",
+            "created_utc",
+            "selected_objective",
+            "latest_validation_status",
+            "latest_review_agent_status",
+            "latest_model_routing_status",
+            "nightly_window_status",
+            "safety_status",
+            "generated_artifacts",
+            "changed_files",
+            "recommended_human_decision",
+            "no_merge_push_or_pr_created",
+        }
+        missing = sorted(required - set(packet))
+        if not missing:
+            recorder.pass_check("approval_packet_required_fields", "Approval packet has required fields", path=approval_dir / "APPROVAL_PACKET.json")
+        else:
+            recorder.fail_check(
+                "approval_packet_required_fields",
+                "Approval packet is missing required fields",
+                path=approval_dir / "APPROVAL_PACKET.json",
+                details={"missing": missing},
+            )
+        if packet.get("generated_by") == "deterministic_human_approval_scaffold":
+            recorder.pass_check("approval_packet_generated_by", "Approval packet generated_by is deterministic", path=approval_dir / "APPROVAL_PACKET.json")
+        else:
+            recorder.fail_check("approval_packet_generated_by", "Approval packet generated_by must be deterministic_human_approval_scaffold", path=approval_dir / "APPROVAL_PACKET.json")
+        safety = packet.get("safety_status")
+        if isinstance(safety, dict) and (
+            safety.get("model_calls_allowed") is False
+            and safety.get("openhands_allowed") is False
+            and safety.get("source_writes_allowed") is False
+            and safety.get("github_pr_created") is False
+            and safety.get("branch_pushed") is False
+            and safety.get("merge_performed") is False
+            and safety.get("max_code_writing_tasks") == 0
+        ):
+            recorder.pass_check("approval_packet_safety_flags", "Approval packet preserves Phase 17 safety flags", path=approval_dir / "APPROVAL_PACKET.json")
+        else:
+            recorder.fail_check("approval_packet_safety_flags", "Approval packet must deny models, OpenHands, source writes, PR creation, push, merge, and code writing", path=approval_dir / "APPROVAL_PACKET.json")
+        if packet.get("recommended_human_decision") in {"accept", "revise", "discard", "hold"}:
+            recorder.pass_check("approval_packet_decision_value", "Approval packet recommended decision is valid", path=approval_dir / "APPROVAL_PACKET.json")
+        else:
+            recorder.fail_check("approval_packet_decision_value", "Approval packet recommended decision must be accept, revise, discard, or hold", path=approval_dir / "APPROVAL_PACKET.json")
+        if packet.get("no_merge_push_or_pr_created") is True:
+            recorder.pass_check("approval_packet_no_pr_push_merge", "Approval packet states no PR, push, or merge occurred", path=approval_dir / "APPROVAL_PACKET.json")
+        else:
+            recorder.fail_check("approval_packet_no_pr_push_merge", "Approval packet must state no PR, push, or merge occurred", path=approval_dir / "APPROVAL_PACKET.json")
+
+    if isinstance(decision, dict):
+        denied = (
+            decision.get("approved_for_source_writes") is False
+            and decision.get("approved_for_model_calls") is False
+            and decision.get("approved_for_openhands") is False
+        )
+        if denied:
+            recorder.pass_check("human_decision_template_denies_future_capabilities", "Human decision template denies source writes, model calls, and OpenHands by default", path=approval_dir / "HUMAN_DECISION_TEMPLATE.json")
+        else:
+            recorder.fail_check("human_decision_template_denies_future_capabilities", "Human decision template must deny source writes, model calls, and OpenHands by default", path=approval_dir / "HUMAN_DECISION_TEMPLATE.json")
+        if decision.get("decision") in {"accept", "revise", "discard", "hold"}:
+            recorder.pass_check("human_decision_template_decision_value", "Human decision template default decision is valid", path=approval_dir / "HUMAN_DECISION_TEMPLATE.json")
+        else:
+            recorder.fail_check("human_decision_template_decision_value", "Human decision template decision must be accept, revise, discard, or hold", path=approval_dir / "HUMAN_DECISION_TEMPLATE.json")
+
+    try:
+        draft = (approval_dir / "DRAFT_PR_PLAN.md").read_text()
+    except OSError:
+        draft = ""
+    if "gh pr create --draft" in draft and "No GitHub command was executed" in draft:
+        recorder.pass_check("draft_pr_text_only", "Draft PR plan contains text-only gh command", path=approval_dir / "DRAFT_PR_PLAN.md")
+    else:
+        recorder.fail_check("draft_pr_text_only", "Draft PR plan must contain a text-only gh pr create --draft command", path=approval_dir / "DRAFT_PR_PLAN.md")
+
+    if isinstance(summary, dict) and isinstance(packet, dict):
+        if summary.get("recommended_human_decision") == packet.get("recommended_human_decision"):
+            recorder.pass_check("approval_summary_matches_packet", "Approval summary matches packet recommendation", path=approval_dir / "APPROVAL_SUMMARY.json")
+        else:
+            recorder.fail_check(
+                "approval_summary_matches_packet",
+                "Approval summary must match packet recommendation",
+                path=approval_dir / "APPROVAL_SUMMARY.json",
+                details={"summary": summary.get("recommended_human_decision"), "packet": packet.get("recommended_human_decision")},
+            )
 
 
 def validate_systemd_artifacts(recorder: CheckRecorder) -> None:
