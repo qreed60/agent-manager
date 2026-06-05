@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "profile_id": "openhands/security",
+  "agent_role": "security",
+  "runner": "openhands",
+  "write_access": false,
+  "system_prompt_filename": "system_prompt.j2",
+  "security_policy_filename": "security_policy.j2",
+  "settings_filename": "settings.template.json",
+  "allowed_tools": [
+    "terminal"
+  ],
+  "expected_output": {
+    "must_include": [
+      "status",
+      "blocking",
+      "evidence",
+      "findings",
+      "recommendations"
+    ]
+  }
+}

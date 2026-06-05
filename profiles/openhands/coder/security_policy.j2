@@ -1,0 +1,19 @@
+# Security Policy: coder
+
+This profile is governed by the central agent-manager safety rules.
+
+Forbidden actions:
+- Do not auto-merge.
+- Do not auto-push.
+- Do not modify main directly.
+- Do not weaken validators.
+- Do not expose secrets.
+- Do not perform destructive filesystem operations.
+- Do not expand scope beyond the assigned task packet.
+
+write_access = true
+
+If the task requires permissions outside this profile, stop and report:
+status: fail
+blocking: true
+reason: permission boundary exceeded

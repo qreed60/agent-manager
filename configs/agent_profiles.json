@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "runner": "openhands",
+  "profiles": {
+    "manager": {
+      "profile_path": "profiles/openhands/manager",
+      "profile_json": "profiles/openhands/manager/profile.json",
+      "write_access": false
+    },
+    "coder": {
+      "profile_path": "profiles/openhands/coder",
+      "profile_json": "profiles/openhands/coder/profile.json",
+      "write_access": true
+    },
+    "validation_review": {
+      "profile_path": "profiles/openhands/validation_review",
+      "profile_json": "profiles/openhands/validation_review/profile.json",
+      "write_access": false
+    },
+    "security": {
+      "profile_path": "profiles/openhands/security",
+      "profile_json": "profiles/openhands/security/profile.json",
+      "write_access": false
+    },
+    "sqa": {
+      "profile_path": "profiles/openhands/sqa",
+      "profile_json": "profiles/openhands/sqa/profile.json",
+      "write_access": false
+    },
+    "scalability": {
+      "profile_path": "profiles/openhands/scalability",
+      "profile_json": "profiles/openhands/scalability/profile.json",
+      "write_access": false
+    },
+    "architecture": {
+      "profile_path": "profiles/openhands/architecture",
+      "profile_json": "profiles/openhands/architecture/profile.json",
+      "write_access": false
+    }
+  }
+}
