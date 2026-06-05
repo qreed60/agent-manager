@@ -214,6 +214,7 @@ def validate_project_state(repo: Path, project: dict[str, Any], recorder: CheckR
 def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str, str]:
     run_root = ROOT / "runs" / project_id
     resolved_dirs: dict[str, str] = {}
+    validate_systemd_artifacts(recorder)
 
     metrics_dir = validate_latest_dir(recorder, "latest_metrics_dir", run_root / "latest")
     if metrics_dir is not None:
@@ -388,6 +389,91 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
         recorder.pass_check("latest_nightly_window_optional", "latest_nightly_window is absent; optional Phase 16 artifacts not validated", path=nightly_window_pointer)
 
     return resolved_dirs
+
+
+def validate_systemd_artifacts(recorder: CheckRecorder) -> None:
+    service_path = ROOT / "systemd" / "agent-manager-nightly@.service"
+    timer_path = ROOT / "systemd" / "agent-manager-nightly@.timer"
+    install_path = ROOT / "scripts" / "install_nightly_timer.sh"
+    check_path = ROOT / "scripts" / "check_nightly_timer.sh"
+    policy_path = ROOT / "configs" / "nightly_window_policy.json"
+
+    validate_text_artifact(recorder, "systemd_nightly_service_readable", service_path)
+    validate_text_artifact(recorder, "systemd_nightly_timer_readable", timer_path)
+    validate_text_artifact(recorder, "install_nightly_timer_readable", install_path)
+    validate_text_artifact(recorder, "check_nightly_timer_readable", check_path)
+    policy = validate_json_artifact(recorder, "nightly_window_policy_parse", policy_path)
+
+    try:
+        service = service_path.read_text()
+        timer = timer_path.read_text()
+        install = install_path.read_text()
+        check = check_path.read_text()
+    except OSError:
+        return
+
+    service_checks = {
+        "systemd_service_user_qreed": "User=qreed" in service,
+        "systemd_service_workdir": "WorkingDirectory=/home/qreed/agent-manager" in service,
+        "systemd_service_project_template": "run_nightly_window.py %i" in service,
+        "systemd_service_venv_python": "/home/qreed/agent-manager/.venv/bin/python" in service,
+        "systemd_service_no_model_calls": "AGENT_MANAGER_NO_MODEL_CALLS=1" in service,
+        "systemd_service_no_openhands": "AGENT_MANAGER_NO_OPENHANDS=1" in service,
+        "systemd_service_no_code_writing": "AGENT_MANAGER_MAX_CODE_WRITING_TASKS=0" in service,
+        "systemd_service_no_indefinite_restart": "Restart=no" in service,
+    }
+    for check_id, passed in service_checks.items():
+        if passed:
+            recorder.pass_check(check_id, f"{check_id} is present", path=service_path)
+        else:
+            recorder.fail_check(check_id, f"{check_id} is missing", path=service_path)
+    if "User=root" not in service:
+        recorder.pass_check("systemd_service_not_root", "Nightly service does not run as root", path=service_path)
+    else:
+        recorder.fail_check("systemd_service_not_root", "Nightly service must not run as root", path=service_path)
+
+    timer_checks = {
+        "systemd_timer_2300": "OnCalendar=*-*-* 23:00:00" in timer,
+        "systemd_timer_no_random_delay": "RandomizedDelaySec" not in "\n".join(
+            line for line in timer.splitlines() if not line.strip().startswith("#")
+        ),
+        "systemd_timer_persistent_documented": "Persistent=true" in timer and "Persistent=true lets user systemd" in timer,
+    }
+    for check_id, passed in timer_checks.items():
+        if passed:
+            recorder.pass_check(check_id, f"{check_id} is present", path=timer_path)
+        else:
+            recorder.fail_check(check_id, f"{check_id} is missing", path=timer_path)
+
+    install_checks = {
+        "install_user_unit_dir": ".config}/systemd/user" in install or ".config/systemd/user" in install,
+        "install_daemon_reload_user": "systemctl --user daemon-reload" in install,
+        "install_enable_timer": "systemctl --user enable \"$TIMER_NAME\"" in install,
+        "install_no_default_run_now": "RUN_NOW=0" in install and "No immediate nightly run was started" in install,
+        "install_validates_runner": "scripts/run_nightly_window.py" in install and "Missing nightly runner" in install,
+        "install_validates_python": ".venv/bin/python" in install and "Missing executable venv python" in install,
+    }
+    for check_id, passed in install_checks.items():
+        if passed:
+            recorder.pass_check(check_id, f"{check_id} is present", path=install_path)
+        else:
+            recorder.fail_check(check_id, f"{check_id} is missing", path=install_path)
+
+    check_script_checks = {
+        "check_status_timer": "systemctl --user status \"$TIMER_NAME\"" in check,
+        "check_list_timers": "systemctl --user list-timers" in check,
+        "check_journal_logs": "journalctl --user -u \"$SERVICE_NAME\"" in check,
+    }
+    for check_id, passed in check_script_checks.items():
+        if passed:
+            recorder.pass_check(check_id, f"{check_id} is present", path=check_path)
+        else:
+            recorder.fail_check(check_id, f"{check_id} is missing", path=check_path)
+
+    if isinstance(policy, dict) and policy.get("max_code_writing_tasks") == 0:
+        recorder.pass_check("nightly_policy_code_writing_disabled", "Nightly policy keeps max_code_writing_tasks at 0", path=policy_path)
+    elif isinstance(policy, dict):
+        recorder.fail_check("nightly_policy_code_writing_disabled", "Nightly policy must keep max_code_writing_tasks at 0", path=policy_path)
 
 
 def validate_nightly_window_artifacts(recorder: CheckRecorder, nightly_window_dir: Path) -> None:

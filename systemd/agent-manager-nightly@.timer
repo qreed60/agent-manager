@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Agent Manager deterministic nightly window daily for project %i
+Documentation=man:systemd.timer(5)
+
+[Timer]
+OnCalendar=*-*-* 23:00:00
+Persistent=true
+# Persistent=true lets user systemd catch up a missed 23:00 run after login.
+# RandomizedDelaySec is intentionally omitted so the run starts at the documented time.
+Unit=agent-manager-nightly@%i.service
+
+[Install]
+WantedBy=timers.target
