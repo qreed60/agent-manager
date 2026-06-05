@@ -3,14 +3,9 @@
   "sources": {
     "openhands_agent_prompts": {
       "name": "OpenHands Agent Prompt Project",
-      "repo_path": "/mnt/projects/openhands-agent-prompts",
-      "purpose": "Project-specific system prompts, OpenHands settings, security policies, and agent profile templates.",
-      "enabled": true,
-      "usage": [
-        "source for central agent-manager profiles",
-        "source for OpenHands system prompt templates",
-        "source for per-agent role prompts"
-      ]
+      "repo_path": "/mnt/projects/openhands-agent-prompts/prompts/profiles",
+      "purpose": "Source project for OpenHands system prompts, agent settings, security policies, and profile templates.",
+      "enabled": true
     }
   }
 }
