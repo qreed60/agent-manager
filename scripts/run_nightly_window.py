@@ -140,15 +140,19 @@ def summarize_latest_artifacts(project_id: str) -> dict[str, Any]:
     review = load_optional_json(latest_artifact(project_id, "latest_review_agents") / "REVIEW_AGENTS_SUMMARY.json")
     model_routing = load_optional_json(latest_artifact(project_id, "latest_model_routing") / "MODEL_ROUTING_SUMMARY.json")
     langgraph = load_optional_json(latest_artifact(project_id, "latest_langgraph_v0") / "LANGGRAPH_RUN_MANIFEST.json")
+    human_approval = load_optional_json(latest_artifact(project_id, "latest_human_approval") / "APPROVAL_SUMMARY.json")
     return {
         "validation_status": validation.get("status"),
         "review_status": review.get("status"),
         "model_routing_status": model_routing.get("status"),
         "langgraph_status": langgraph.get("status"),
+        "human_approval_status": human_approval.get("status"),
+        "human_approval_decision": human_approval.get("recommended_human_decision"),
         "validation_run_dir": validation.get("run_dir"),
         "review_run_dir": review.get("run_dir"),
         "model_routing_run_dir": model_routing.get("run_dir"),
         "langgraph_run_dir": langgraph.get("run_dir"),
+        "human_approval_run_dir": human_approval.get("run_dir"),
     }
 
 
@@ -318,6 +322,13 @@ def build_handoff(
         "## Model Routing Summary",
         "",
         f"- Status: {latest_summary.get('model_routing_status') or 'missing'}",
+        "",
+        "## Human Approval Packet",
+        "",
+        f"- Status: {latest_summary.get('human_approval_status') or 'missing'}",
+        f"- Recommended decision: {latest_summary.get('human_approval_decision') or 'missing'}",
+        f"- Latest packet: {latest_summary.get('human_approval_run_dir') or 'not generated yet'}",
+        f"- Generate packet: python3 scripts/prepare_human_approval_packet.py {project_id}",
         "",
         "## Safety Status",
         "",

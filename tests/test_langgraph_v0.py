@@ -56,6 +56,7 @@ class LangGraphV0HelperTests(unittest.TestCase):
                 "validate_agent_run",
                 "run_readonly_review_agents",
                 "compile_model_routing_plan",
+                "prepare_human_approval_packet",
                 "finalize",
             ],
         )

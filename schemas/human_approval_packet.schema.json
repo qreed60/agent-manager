@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Human approval packet",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "created_utc",
+    "run_dir",
+    "generated_by",
+    "selected_objective",
+    "safety_status",
+    "generated_artifacts",
+    "changed_files",
+    "recommended_human_decision",
+    "no_merge_push_or_pr_created",
+    "explicit_non_actions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+    },
+    "run_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_by": {
+      "const": "deterministic_human_approval_scaffold"
+    },
+    "selected_objective": {
+      "type": "object"
+    },
+    "safety_status": {
+      "type": "object"
+    },
+    "generated_artifacts": {
+      "type": "object"
+    },
+    "changed_files": {
+      "type": "array"
+    },
+    "recommended_human_decision": {
+      "enum": [
+        "accept",
+        "revise",
+        "discard",
+        "hold"
+      ]
+    },
+    "no_merge_push_or_pr_created": {
+      "const": true
+    },
+    "explicit_non_actions": {
+      "type": "array"
+    }
+  }
+}
