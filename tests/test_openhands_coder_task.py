@@ -460,6 +460,146 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
             run_openhands_coder_task.ROOT = old_root
             tmp.cleanup()
 
+    def test_live_execution_creates_fresh_worktree(self) -> None:
+        """Live execution must create a fresh worktree path per run."""
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            worktree_info = json.loads((run_dir / "OPENHANDS_WORKTREE_INFO.json").read_text())
+            self.assertTrue(worktree_info.get("worktree_created"), "fresh_worktree_created must be true for live runs")
+            wt_path = Path(worktree_info["worktree_path"])
+            # Must be under worktrees/<project_id>/openhands_coder_<timestamp>
+            self.assertIn(f"openhands_coder_20260605T120000Z", str(wt_path))
+
+    def test_live_execution_does_not_reuse_latest_coder_worktree(self) -> None:
+        """Live execution must not reuse the latest_coder_worktree symlink target."""
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            coder_run = json.loads((run_dir / "OPENHANDS_CODER_RUN.json").read_text())
+            self.assertFalse(coder_run.get("reused_existing_worktree"), "live runs must not reuse existing worktrees")
+
+    def test_changed_file_detection_includes_untracked_files(self) -> None:
+        """detect_changed_files must include untracked files in all_changed_files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            wt = Path(tmp) / "worktree"
+            wt.mkdir()
+            subprocess.run(["git", "init"], cwd=wt, check=True, capture_output=True)
+            (wt / "existing.txt").write_text("existing\n")
+            subprocess.run(["git", "add", "existing.txt"], cwd=wt, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-c", "user.email=t@t.com", "-c", "user.name=T", "commit", "-m", "init"],
+                cwd=wt, check=True, capture_output=True,
+            )
+            # Create untracked file
+            (wt / "new_file.txt").write_text("untracked\n")
+            changed = run_openhands_coder_task.detect_changed_files(wt)
+            self.assertIn("new_file.txt", changed["untracked_files"])
+            self.assertIn("new_file.txt", changed["all_changed_files"])
+
+    def test_smoke_scope_allows_only_expected_file(self) -> None:
+        """Smoke scope guard must allow only .agent_manager_scratch/OPENHANDS_SMOKE_TEST.md."""
+        scope = run_openhands_coder_task.compute_scope_status(
+            smoke_task=True,
+            objective={},
+            changed_files=[".agent_manager_scratch/OPENHANDS_SMOKE_TEST.md"],
+            canonical_repo_clean=True,
+        )
+        self.assertEqual(scope["scope_status"], "pass")
+
+    def test_scope_status_fails_on_extra_untracked_file(self) -> None:
+        """Scope status must fail if any changed file is outside the allowed list."""
+        scope = run_openhands_coder_task.compute_scope_status(
+            smoke_task=True,
+            objective={},
+            changed_files=[".agent_manager_scratch/OPENHANDS_SMOKE_TEST.md", "extra_file.txt"],
+            canonical_repo_clean=True,
+        )
+        self.assertEqual(scope["scope_status"], "fail")
+
+    def test_summary_status_follows_scope_status(self) -> None:
+        """Summary status must follow scope guard status."""
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            scope_status = json.loads((run_dir / "OPENHANDS_SCOPE_STATUS.json").read_text())
+            summary_json = json.loads((run_dir / "OPENHANDS_CODER_SUMMARY.json").read_text())
+            if scope_status.get("scope_status") == "fail":
+                self.assertEqual(summary_json["status"], "fail")
+
+    def test_validation_fails_on_scope_fail(self) -> None:
+        """Validation must fail when scope status is fail."""
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            scope_path = run_dir / "OPENHANDS_SCOPE_STATUS.json"
+            scope = json.loads(scope_path.read_text())
+            scope["scope_status"] = "fail"
+            scope["details"] = "file outside scope: extra.txt"
+            scope_path.write_text(json.dumps(scope) + "\n")
+
+            old_root = validate_agent_run.ROOT
+            validate_agent_run.ROOT = root
+            try:
+                recorder = validate_agent_run.CheckRecorder()
+                validate_agent_run.validate_openhands_coder_artifacts(
+                    recorder,
+                    (root / "runs" / project_id / "latest_openhands_coder").resolve(),
+                )
+            finally:
+                validate_agent_run.ROOT = old_root
+            failed_ids = {check["id"] for check in recorder.failures()}
+            self.assertIn("openhands_scope_guard_fail", failed_ids)
+
+    def test_validation_passes_on_smoke_pass_with_fresh_worktree(self) -> None:
+        """Validation must pass when smoke passes and fresh worktree was created."""
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            old_root = validate_agent_run.ROOT
+            validate_agent_run.ROOT = root
+            try:
+                recorder = validate_agent_run.CheckRecorder()
+                validate_agent_run.validate_openhands_coder_artifacts(
+                    recorder,
+                    (root / "runs" / project_id / "latest_openhands_coder").resolve(),
+                )
+            finally:
+                validate_agent_run.ROOT = old_root
+            self.assertEqual(recorder.failures(), [], json.dumps(recorder.failures(), indent=2))
+
+    def test_default_dry_run_behavior_unchanged(self) -> None:
+        """Default dry-run must not create a fresh worktree."""
+        tmp, root, project_id, summary, _runner = self.run_sample(dry_run=True)
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            coder_run = json.loads((run_dir / "OPENHANDS_CODER_RUN.json").read_text())
+            self.assertFalse(coder_run.get("fresh_worktree_created"), "dry runs must not create fresh worktrees")
+
 
 if __name__ == "__main__":
     unittest.main()
