@@ -879,9 +879,16 @@ def validate_systemd_artifacts(recorder: CheckRecorder) -> None:
     except OSError:
         return
 
+    active_service_lines = [
+        line.strip()
+        for line in service.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
     service_checks = {
-        "systemd_service_user_qreed": "User=qreed" in service,
+        "systemd_service_no_user": not any(line.startswith("User=") for line in active_service_lines),
+        "systemd_service_no_group": not any(line.startswith("Group=") for line in active_service_lines),
         "systemd_service_workdir": "WorkingDirectory=/home/qreed/agent-manager" in service,
+        "systemd_service_venv_path": "Environment=PATH=/home/qreed/agent-manager/.venv/bin:/usr/local/bin:/usr/bin:/bin" in service,
         "systemd_service_project_template": "run_nightly_window.py %i" in service,
         "systemd_service_venv_python": "/home/qreed/agent-manager/.venv/bin/python" in service,
         "systemd_service_no_model_calls": "AGENT_MANAGER_NO_MODEL_CALLS=1" in service,

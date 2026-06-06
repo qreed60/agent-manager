@@ -52,12 +52,15 @@ The template service accepts project id as `%i` and runs:
 
 It uses:
 
-- `User=qreed`
 - `WorkingDirectory=/home/qreed/agent-manager`
+- `Environment=PATH=/home/qreed/agent-manager/.venv/bin:/usr/local/bin:/usr/bin:/bin`
 - `AGENT_MANAGER_NO_MODEL_CALLS=1`
 - `AGENT_MANAGER_NO_OPENHANDS=1`
 - `AGENT_MANAGER_MAX_CODE_WRITING_TASKS=0`
 - `Restart=no`
+
+The template is installed as a `systemd --user` unit, so it does not declare
+`User=` or `Group=`.
 
 Logs are available through user journal:
 
