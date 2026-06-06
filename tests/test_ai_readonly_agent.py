@@ -90,7 +90,7 @@ class AiReadonlyAgentTests(unittest.TestCase):
                     project_id,
                     created_utc="20260605T130000Z",
                     allow_model_call=True,
-                    env_allow_key=None,  # simulate missing env var
+                    env_allow_key="AGENT_MANAGER_TEST_MISSING_MODEL_CALLS",
                 )
             finally:
                 run_ai_readonly_agent.ROOT = old_root
