@@ -216,6 +216,34 @@ class ReadonlyReviewAgentsTests(unittest.TestCase):
         self.assertEqual(report["status"], "fail")
         self.assertTrue(report["blocking"])
 
+    def test_validation_review_nonblocking_when_orchestrator_artifacts_were_intentionally_skipped(self) -> None:
+        report = run_readonly_review_agents.validation_review(
+            "sample_project",
+            "20260605T010203Z",
+            Path("/tmp/review_agents_test"),
+            {
+                "validation_report": {
+                    "status": "pass",
+                    "failures": [],
+                    "validation_mode": {
+                        "skip_orchestrator_artifacts": True,
+                        "skipped_orchestrator_artifacts": ["latest_langgraph_v0", "latest_nightly_window"],
+                        "skip_reason": "orchestrated mode avoids stale/current orchestrator artifact recursion",
+                    },
+                },
+                "morning_report": {},
+                "langgraph_manifest": {"status": "fail"},
+                "langgraph_state_final": {"status": "fail"},
+            },
+        )
+
+        self.assertEqual(report["status"], "pass")
+        self.assertFalse(report["blocking"])
+        self.assertEqual(
+            report["summary"]["skipped_orchestrator_artifacts"],
+            ["latest_langgraph_v0", "latest_nightly_window"],
+        )
+
     def test_scalability_review_warns_nonblocking_when_evidence_missing(self) -> None:
         old_root = run_readonly_review_agents.ROOT
         with tempfile.TemporaryDirectory() as tmp:
