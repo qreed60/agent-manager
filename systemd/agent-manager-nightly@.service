@@ -4,8 +4,8 @@ Documentation=man:systemd.service(5)
 
 [Service]
 Type=oneshot
-User=qreed
 WorkingDirectory=/home/qreed/agent-manager
+Environment=PATH=/home/qreed/agent-manager/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=AGENT_MANAGER_NO_MODEL_CALLS=1
 Environment=AGENT_MANAGER_NO_OPENHANDS=1
 Environment=AGENT_MANAGER_MAX_CODE_WRITING_TASKS=0
