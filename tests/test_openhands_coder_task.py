@@ -85,11 +85,17 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         allow_openhands: bool = False,
         enable_env: bool = False,
         dry_run: bool = False,
+        openhands_help: str = "--override-with-envs --headless --file --json --exit-without-confirmation",
     ) -> tuple[tempfile.TemporaryDirectory[str], Path, str, dict, MagicMock]:
         tmp, root, project_id, _repo, worktree = self.make_sample_root()
         old_root = run_openhands_coder_task.ROOT
         run_openhands_coder_task.ROOT = root
-        runner = MagicMock(return_value=subprocess.CompletedProcess(["openhands"], 0, "ok", ""))
+        def fake_runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "--help" in command:
+                return subprocess.CompletedProcess(command, 0, openhands_help, "")
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+
+        runner = MagicMock(side_effect=fake_runner)
         env_patch = {"AGENT_MANAGER_ENABLE_OPENHANDS": "1"} if enable_env else {}
         try:
             with patch.dict(os.environ, env_patch, clear=False):
@@ -163,10 +169,66 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         with tmp:
             self.assertFalse(summary["dry_run"])
             self.assertTrue(summary["openhands_execution_performed"])
-            runner.assert_called_once()
+            self.assertEqual(runner.call_count, 2)
             command = runner.call_args.args[0]
             forbidden = {"push", "merge", "commit", "pr"}
             self.assertTrue(forbidden.isdisjoint(set(command)))
+
+    def test_live_command_uses_headless_file_prompt_when_supported(self) -> None:
+        tmp, _root, _project_id, summary, runner = self.run_sample(allow_openhands=True, enable_env=True)
+        with tmp:
+            self.assertEqual(runner.call_count, 2)
+            command = runner.call_args.args[0]
+            self.assertIn("--headless", command)
+            self.assertIn("--file", command)
+            self.assertIn("--json", command)
+            self.assertIn("--exit-without-confirmation", command)
+            prompt_arg = command[command.index("--file") + 1]
+            self.assertTrue(prompt_arg.endswith("OPENHANDS_TASK_PROMPT.md"))
+            command_text = (Path(summary["run_dir"]) / "OPENHANDS_COMMAND.txt").read_text()
+            self.assertIn("--headless", command_text)
+            self.assertIn("--file", command_text)
+
+    def test_live_command_uses_task_text_when_file_is_unavailable(self) -> None:
+        tmp, _root, _project_id, summary, runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            openhands_help="--override-with-envs --headless --task",
+        )
+        with tmp:
+            self.assertEqual(runner.call_count, 2)
+            command = runner.call_args.args[0]
+            self.assertIn("--headless", command)
+            self.assertNotIn("--file", command)
+            self.assertIn("--task", command)
+            task_arg = command[command.index("--task") + 1]
+            self.assertIn("# OpenHands Controlled Coder Task", task_arg)
+            self.assertNotEqual(Path(task_arg).name, "OPENHANDS_TASK_PROMPT.md")
+            run_record = json.loads((Path(summary["run_dir"]) / "OPENHANDS_CODER_RUN.json").read_text())
+            self.assertIn("--task", run_record["command_argv_redacted"])
+
+    def test_live_execution_refuses_when_headless_is_unsupported(self) -> None:
+        tmp, _root, _project_id, summary, runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            openhands_help="--override-with-envs --file --task",
+        )
+        with tmp:
+            self.assertEqual(runner.call_count, 1)
+            self.assertFalse(summary["openhands_execution_performed"])
+            self.assertTrue(summary["dry_run"])
+            self.assertEqual(summary["status"], "fail")
+            self.assertIn("--headless", summary["command_refusal_reason"])
+            command_text = (Path(summary["run_dir"]) / "OPENHANDS_COMMAND.txt").read_text()
+            self.assertIn("[refused:", command_text)
+
+    def test_default_command_does_not_use_detached_tmux_session(self) -> None:
+        tmp, _root, _project_id, summary, runner = self.run_sample()
+        with tmp:
+            runner.assert_not_called()
+            command_text = (Path(summary["run_dir"]) / "OPENHANDS_COMMAND.txt").read_text()
+            self.assertNotIn("tmux", command_text)
+            self.assertNotIn("new-session", command_text)
 
     def test_validation_accepts_latest_openhands_coder_dry_run_artifacts(self) -> None:
         tmp, root, project_id, summary, _runner = self.run_sample()

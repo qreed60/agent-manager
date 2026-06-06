@@ -8,6 +8,7 @@ to an isolated worktree under worktrees/<project_id>/.
 from __future__ import annotations
 
 import argparse
+import re
 from datetime import datetime, timezone
 import json
 import os
@@ -60,6 +61,11 @@ ARTIFACT_POINTERS: dict[str, tuple[str, ...]] = {
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+OPENHANDS_CAPABILITY_TIMEOUT_SECONDS = 30
+
+
+class OpenHandsCommandError(RuntimeError):
+    """Raised when a safe headless OpenHands command cannot be built."""
 
 
 def utc_now() -> str:
@@ -318,11 +324,98 @@ Worktree: {worktree}
     return prompt
 
 
-def build_openhands_command(openhands_command: str, prompt_path: Path) -> list[str]:
+def openhands_base_command(openhands_command: str) -> list[str]:
     base = shlex.split(openhands_command)
     if not base:
         base = ["openhands"]
+    return base
+
+
+def build_openhands_command(openhands_command: str, prompt_path: Path) -> list[str]:
+    base = openhands_base_command(openhands_command)
     return [*base, "--override-with-envs", "--task", str(prompt_path)]
+
+
+def parse_openhands_help_flags(help_text: str) -> set[str]:
+    return set(re.findall(r"(?<![\w-])--[A-Za-z0-9][A-Za-z0-9-]*", help_text))
+
+
+def detect_openhands_supported_flags(
+    openhands_command: str,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    command_runner: CommandRunner,
+) -> tuple[set[str], int]:
+    command = [*openhands_base_command(openhands_command), "--help"]
+    result = command_runner(
+        command,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=OPENHANDS_CAPABILITY_TIMEOUT_SECONDS,
+    )
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    return parse_openhands_help_flags(stdout + "\n" + stderr), int(result.returncode)
+
+
+def build_headless_openhands_command(
+    openhands_command: str,
+    *,
+    prompt_path: Path,
+    prompt_text: str,
+    supported_flags: set[str],
+) -> list[str]:
+    if "--headless" not in supported_flags:
+        raise OpenHandsCommandError("OpenHands does not support --headless; refusing to launch the interactive CLI")
+
+    command = [*openhands_base_command(openhands_command), "--override-with-envs", "--headless"]
+    if "--json" in supported_flags:
+        command.append("--json")
+    if "--exit-without-confirmation" in supported_flags:
+        command.append("--exit-without-confirmation")
+
+    if "--file" in supported_flags:
+        command.extend(["--file", str(prompt_path)])
+    elif "--task" in supported_flags:
+        command.extend(["--task", prompt_text])
+    else:
+        raise OpenHandsCommandError("OpenHands supports --headless but neither --file nor --task")
+
+    validate_headless_openhands_command(command)
+    return command
+
+
+def validate_headless_openhands_command(command: list[str]) -> None:
+    if not command:
+        raise OpenHandsCommandError("empty OpenHands command")
+    launcher = Path(command[0]).name
+    if launcher in {"tmux", "screen"}:
+        raise OpenHandsCommandError(f"refusing detached interactive launcher: {launcher}")
+    if "--headless" not in command:
+        raise OpenHandsCommandError("refusing OpenHands command without --headless")
+    if "--override-with-envs" not in command:
+        raise OpenHandsCommandError("refusing OpenHands command without --override-with-envs")
+    if "--file" in command:
+        index = command.index("--file")
+        if index + 1 >= len(command) or not command[index + 1]:
+            raise OpenHandsCommandError("OpenHands --file requires a prompt path")
+        return
+    if "--task" in command:
+        index = command.index("--task")
+        if index + 1 >= len(command) or not command[index + 1]:
+            raise OpenHandsCommandError("OpenHands --task requires prompt text")
+        if Path(command[index + 1]).name == "OPENHANDS_TASK_PROMPT.md":
+            raise OpenHandsCommandError("refusing to pass a prompt file path through --task")
+        return
+    raise OpenHandsCommandError("refusing OpenHands command without --file or --task")
+
+
+def refused_openhands_command(openhands_command: str, reason: str) -> list[str]:
+    return [*openhands_base_command(openhands_command), "--override-with-envs", f"[refused: {reason}]"]
 
 
 def build_safety_status(
@@ -433,26 +526,53 @@ def generate(
     timed_out = False
     execution_performed = False
     returncode = 0
+    command_refusal_reason: str | None = None
+    openhands_supported_flags: list[str] | None = None
+    openhands_help_returncode: int | None = None
 
     if safety["openhands_execution_allowed"]:
-        execution_performed = True
         try:
-            result = run_openhands(
-                command,
+            supported_flags, help_returncode = detect_openhands_supported_flags(
+                openhands_command,
                 cwd=worktree,
                 env=env,
-                timeout_seconds=timeout_seconds,
                 command_runner=command_runner,
             )
-            stdout = result.stdout or ""
-            stderr = result.stderr or ""
-            returncode = int(result.returncode)
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            returncode = 124
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            stderr += f"\nOpenHands timed out after {timeout_seconds} seconds.\n"
+            openhands_supported_flags = sorted(supported_flags)
+            openhands_help_returncode = help_returncode
+            command = build_headless_openhands_command(
+                openhands_command,
+                prompt_path=prompt_path,
+                prompt_text=prompt,
+                supported_flags=supported_flags,
+            )
+        except (OpenHandsCommandError, subprocess.TimeoutExpired, OSError) as exc:
+            command_refusal_reason = str(exc)
+            command = refused_openhands_command(openhands_command, command_refusal_reason)
+            stderr = f"{command_refusal_reason}\n"
+            returncode = 2
+            safety["openhands_execution_allowed"] = False
+            safety["dry_run"] = True
+            safety["worktree_writes_allowed"] = False
+        if command_refusal_reason is None:
+            execution_performed = True
+            try:
+                result = run_openhands(
+                    command,
+                    cwd=worktree,
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                    command_runner=command_runner,
+                )
+                stdout = result.stdout or ""
+                stderr = result.stderr or ""
+                returncode = int(result.returncode)
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                returncode = 124
+                stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+                stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+                stderr += f"\nOpenHands timed out after {timeout_seconds} seconds.\n"
     else:
         result = completed_without_run(command)
         stdout = result.stdout or ""
@@ -471,7 +591,7 @@ def generate(
         "execution_performed": execution_performed,
         "returncode": returncode,
         "timed_out": timed_out,
-        "status": "pass" if returncode == 0 else "warn",
+        "status": "pass" if returncode == 0 else ("fail" if command_refusal_reason else "warn"),
     }
     run_record = {
         "schema_version": 1,
@@ -488,6 +608,9 @@ def generate(
         "command_argv_redacted": command,
         "execution_performed": execution_performed,
         "required_artifacts": REQUIRED_ARTIFACTS,
+        "openhands_supported_flags": openhands_supported_flags,
+        "openhands_help_returncode": openhands_help_returncode,
+        "command_refusal_reason": command_refusal_reason,
     }
     summary = {
         "schema_version": 1,
@@ -504,6 +627,7 @@ def generate(
         "returncode": returncode,
         "worktree_changed": before_status != after_status or bool(after_status.strip()),
         "no_commit_push_merge_or_pr_performed": True,
+        "command_refusal_reason": command_refusal_reason,
     }
 
     (run_dir / "OPENHANDS_COMMAND.txt").write_text(shlex.join(command) + "\n")
