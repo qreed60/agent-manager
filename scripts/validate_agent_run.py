@@ -548,6 +548,11 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
         data = validate_json_artifact(recorder, check_id, coder_dir / filename)
         if data is not None:
             parsed[filename] = data
+    smoke_path = coder_dir / "OPENHANDS_SMOKE_STATUS.json"
+    if smoke_path.exists():
+        data = validate_json_artifact(recorder, "openhands_smoke_status_parse", smoke_path)
+        if data is not None:
+            parsed["OPENHANDS_SMOKE_STATUS.json"] = data
     for filename in required_text:
         validate_text_artifact(recorder, f"{filename}_readable", coder_dir / filename)
 
@@ -626,6 +631,60 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
             recorder.pass_check("openhands_summary_generated_by", "OPENHANDS_CODER_SUMMARY.json generated_by is phase18b", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
         else:
             recorder.fail_check("openhands_summary_generated_by", f"OPENHANDS_CODER_SUMMARY.json generated_by must be phase18b_controlled_openhands_coder_execution; found {gen_by!r}", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
+
+    smoke = parsed.get("OPENHANDS_SMOKE_STATUS.json")
+    if isinstance(smoke, dict):
+        required_fields = {
+            "smoke_task",
+            "expected_file",
+            "expected_file_exists",
+            "canonical_repo_clean",
+            "returncode",
+            "timed_out",
+            "status",
+        }
+        missing = sorted(required_fields - set(smoke))
+        if not missing:
+            recorder.pass_check("openhands_smoke_required_fields", "OPENHANDS_SMOKE_STATUS.json has required fields", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
+        else:
+            recorder.fail_check(
+                "openhands_smoke_required_fields",
+                "OPENHANDS_SMOKE_STATUS.json is missing required fields",
+                path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
+                details={"missing": missing},
+            )
+        field_types = {
+            "smoke_task": bool,
+            "expected_file": str,
+            "expected_file_exists": bool,
+            "canonical_repo_clean": bool,
+            "returncode": int,
+            "timed_out": bool,
+        }
+        bad_types = sorted(
+            key for key, expected_type in field_types.items() if key in smoke and not isinstance(smoke.get(key), expected_type)
+        )
+        if not bad_types:
+            recorder.pass_check("openhands_smoke_field_types", "OPENHANDS_SMOKE_STATUS.json field types are valid", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
+        else:
+            recorder.fail_check(
+                "openhands_smoke_field_types",
+                "OPENHANDS_SMOKE_STATUS.json has invalid field types",
+                path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
+                details={"bad_types": bad_types},
+            )
+        if smoke.get("status") in {"pass", "warn"}:
+            recorder.pass_check("openhands_smoke_status_value", f"OPENHANDS_SMOKE_STATUS.json status is {smoke.get('status')!r}", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
+        else:
+            recorder.fail_check("openhands_smoke_status_value", f"OPENHANDS_SMOKE_STATUS.json status must be pass or warn; found {smoke.get('status')!r}", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
+        if smoke.get("canonical_repo_clean") is True:
+            recorder.pass_check("openhands_smoke_canonical_repo_clean", "Smoke task reports canonical repo clean", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
+        else:
+            recorder.fail_check(
+                "openhands_smoke_canonical_repo_clean",
+                "Smoke task must not write to the canonical repo; canonical_repo_clean must be true",
+                path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
+            )
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:

@@ -62,6 +62,7 @@ ARTIFACT_POINTERS: dict[str, tuple[str, ...]] = {
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 OPENHANDS_CAPABILITY_TIMEOUT_SECONDS = 30
+SMOKE_EXPECTED_FILE = ".agent_manager_scratch/OPENHANDS_SMOKE_TEST.md"
 
 
 class OpenHandsCommandError(RuntimeError):
@@ -324,6 +325,51 @@ Worktree: {worktree}
     return prompt
 
 
+def truncate_prompt(prompt: str, max_prompt_chars: int) -> str:
+    if len(prompt) <= max_prompt_chars:
+        return prompt
+    suffix = "\n\n[Prompt truncated to respect --max-prompt-chars]\n"
+    return prompt[: max(0, max_prompt_chars - len(suffix))] + suffix
+
+
+def build_smoke_prompt() -> str:
+    return f"""# OpenHands Smoke Task
+
+Create `{SMOKE_EXPECTED_FILE}` and write one short sentence confirming smoke completion.
+
+Boundaries:
+- Do not inspect the repository broadly.
+- Do not run tests.
+- Do not commit.
+- Do not push.
+- Finish immediately after writing the file.
+"""
+
+
+def prompt_override_count(task_text: str | None, task_file: str | None, smoke_task: bool) -> int:
+    return sum([task_text is not None, task_file is not None, smoke_task])
+
+
+def resolve_prompt(
+    *,
+    generated_prompt: str,
+    task_text: str | None,
+    task_file: str | None,
+    smoke_task: bool,
+    max_prompt_chars: int,
+) -> tuple[str, str]:
+    count = prompt_override_count(task_text, task_file, smoke_task)
+    if count > 1:
+        raise ValueError("--task-text, --task-file, and --smoke-task are mutually exclusive")
+    if task_text is not None:
+        return truncate_prompt(task_text, max_prompt_chars), "task_text"
+    if task_file is not None:
+        return truncate_prompt(Path(task_file).expanduser().read_text(), max_prompt_chars), "task_file"
+    if smoke_task:
+        return truncate_prompt(build_smoke_prompt(), max_prompt_chars), "smoke_task"
+    return generated_prompt, "generated"
+
+
 def openhands_base_command(openhands_command: str) -> list[str]:
     base = shlex.split(openhands_command)
     if not base:
@@ -482,6 +528,9 @@ def generate(
     env_file: str | None = None,
     dry_run: bool = False,
     allow_openhands: bool = False,
+    task_text: str | None = None,
+    task_file: str | None = None,
+    smoke_task: bool = False,
     command_runner: CommandRunner = subprocess.run,
 ) -> dict[str, Any]:
     created = created_utc or utc_now()
@@ -497,11 +546,18 @@ def generate(
     run_dir.mkdir(parents=True, exist_ok=True)
     objective = select_objective(project, objective_id)
     artifact_summaries = load_artifact_summaries(project_id)
-    prompt = build_prompt(
+    generated_prompt = build_prompt(
         project_id=project_id,
         objective=objective,
         worktree=worktree,
         artifact_summaries=artifact_summaries,
+        max_prompt_chars=max_prompt_chars,
+    )
+    prompt, prompt_source = resolve_prompt(
+        generated_prompt=generated_prompt,
+        task_text=task_text,
+        task_file=task_file,
+        smoke_task=smoke_task,
         max_prompt_chars=max_prompt_chars,
     )
     prompt_path = run_dir / "OPENHANDS_TASK_PROMPT.md"
@@ -583,6 +639,10 @@ def generate(
     diff_summary = git_output(["diff", "--stat"], worktree)
     if not diff_summary.strip():
         diff_summary = "No unstaged diff reported.\n"
+    canonical_repo_status = git_output(["status", "--short"], canonical_repo)
+    canonical_repo_clean = not canonical_repo_status.strip()
+    expected_smoke_file = worktree / SMOKE_EXPECTED_FILE
+    expected_smoke_file_exists = expected_smoke_file.exists()
 
     exit_status = {
         "schema_version": 1,
@@ -606,6 +666,7 @@ def generate(
         "artifacts_read": artifact_summaries,
         "env_summary": env_summary,
         "command_argv_redacted": command,
+        "prompt_source": prompt_source,
         "execution_performed": execution_performed,
         "required_artifacts": REQUIRED_ARTIFACTS,
         "openhands_supported_flags": openhands_supported_flags,
@@ -624,11 +685,35 @@ def generate(
         "worktree_git_branch": branch,
         "openhands_execution_performed": execution_performed,
         "dry_run": safety["dry_run"],
+        "prompt_source": prompt_source,
         "returncode": returncode,
         "worktree_changed": before_status != after_status or bool(after_status.strip()),
         "no_commit_push_merge_or_pr_performed": True,
         "command_refusal_reason": command_refusal_reason,
     }
+    smoke_status: dict[str, Any] | None = None
+    if smoke_task:
+        smoke_passed = (
+            execution_performed
+            and returncode == 0
+            and not timed_out
+            and expected_smoke_file_exists
+            and canonical_repo_clean
+        )
+        smoke_status = {
+            "schema_version": 1,
+            "project_id": project_id,
+            "created_utc": created,
+            "smoke_task": True,
+            "expected_file": SMOKE_EXPECTED_FILE,
+            "expected_file_exists": expected_smoke_file_exists,
+            "canonical_repo_clean": canonical_repo_clean,
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "openhands_execution_performed": execution_performed,
+            "status": "pass" if smoke_passed else ("fail" if not canonical_repo_clean else "warn"),
+        }
+        summary["smoke_status"] = smoke_status["status"]
 
     (run_dir / "OPENHANDS_COMMAND.txt").write_text(shlex.join(command) + "\n")
     (run_dir / "OPENHANDS_STDOUT.txt").write_text(stdout)
@@ -639,6 +724,8 @@ def generate(
     write_json(run_dir / "OPENHANDS_CODER_RUN.json", run_record)
     write_json(run_dir / "OPENHANDS_EXIT_STATUS.json", exit_status)
     write_json(run_dir / "OPENHANDS_SAFETY_STATUS.json", safety)
+    if smoke_status is not None:
+        write_json(run_dir / "OPENHANDS_SMOKE_STATUS.json", smoke_status)
     write_json(run_dir / "OPENHANDS_CODER_SUMMARY.json", summary)
     (run_dir / "OPENHANDS_CODER_RUN.md").write_text(
         f"""# OpenHands Coder Run
@@ -681,7 +768,12 @@ def main() -> None:
     parser.add_argument("--openhands-command", default="openhands")
     parser.add_argument("--env-file", default=None)
     parser.add_argument("--dry-run", action="store_true", default=False)
+    parser.add_argument("--task-text", default=None)
+    parser.add_argument("--task-file", default=None)
+    parser.add_argument("--smoke-task", action="store_true", default=False)
     args = parser.parse_args()
+    if prompt_override_count(args.task_text, args.task_file, args.smoke_task) > 1:
+        parser.error("--task-text, --task-file, and --smoke-task are mutually exclusive")
 
     summary = generate(
         args.project_id,
@@ -693,6 +785,9 @@ def main() -> None:
         env_file=args.env_file,
         dry_run=args.dry_run,
         allow_openhands=args.allow_openhands,
+        task_text=args.task_text,
+        task_file=args.task_file,
+        smoke_task=args.smoke_task,
     )
     print(f"OpenHands coder scaffold status: {summary['status']}")
     print(f"Run dir: {summary['run_dir']}")

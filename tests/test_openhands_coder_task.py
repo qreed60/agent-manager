@@ -72,6 +72,14 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         (state_dir / "OBJECTIVE_BACKLOG.json").write_text(
             json.dumps({"schema_version": 1, "project_id": project_id, "objectives": [objective]}) + "\n"
         )
+        subprocess.run(["git", "add", ".agent_manager/OBJECTIVE_BACKLOG.json"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            ["git", "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "add state"],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         coder_dir = root / "runs" / project_id / "coder_worktree_20260605T000000Z"
         coder_dir.mkdir()
         (coder_dir / "CODER_TASK_PACKET.json").write_text(json.dumps({"worktree": str(worktree), "objective": objective}) + "\n")
@@ -86,13 +94,25 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         enable_env: bool = False,
         dry_run: bool = False,
         openhands_help: str = "--override-with-envs --headless --file --json --exit-without-confirmation",
+        task_text: str | None = None,
+        task_file: str | None = None,
+        smoke_task: bool = False,
+        write_smoke_file: bool = False,
+        timeout_on_run: bool = False,
     ) -> tuple[tempfile.TemporaryDirectory[str], Path, str, dict, MagicMock]:
         tmp, root, project_id, _repo, worktree = self.make_sample_root()
         old_root = run_openhands_coder_task.ROOT
         run_openhands_coder_task.ROOT = root
-        def fake_runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        def fake_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             if "--help" in command:
                 return subprocess.CompletedProcess(command, 0, openhands_help, "")
+            if timeout_on_run:
+                raise subprocess.TimeoutExpired(command, timeout=1, output="", stderr="")
+            if write_smoke_file:
+                cwd = Path(str(kwargs["cwd"]))
+                smoke_file = cwd / run_openhands_coder_task.SMOKE_EXPECTED_FILE
+                smoke_file.parent.mkdir(parents=True, exist_ok=True)
+                smoke_file.write_text("OpenHands smoke task completed.\n")
             return subprocess.CompletedProcess(command, 0, "ok", "")
 
         runner = MagicMock(side_effect=fake_runner)
@@ -105,6 +125,9 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
                     allow_openhands=allow_openhands,
                     dry_run=dry_run,
                     worktree_path=str(worktree),
+                    task_text=task_text,
+                    task_file=task_file,
+                    smoke_task=smoke_task,
                     command_runner=runner,
                 )
         finally:
@@ -116,6 +139,7 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         with tmp:
             self.assertTrue(summary["dry_run"])
             self.assertFalse(summary["openhands_execution_performed"])
+            self.assertEqual(summary["prompt_source"], "generated")
             runner.assert_not_called()
 
     def test_allow_openhands_still_requires_env_gate(self) -> None:
@@ -137,6 +161,61 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         with tmp:
             run_record = json.loads((Path(summary["run_dir"]) / "OPENHANDS_CODER_RUN.json").read_text())
             self.assertIn("--override-with-envs", run_record["command_argv_redacted"])
+            self.assertEqual(run_record["prompt_source"], "generated")
+
+    def test_smoke_task_generates_tiny_prompt(self) -> None:
+        tmp, _root, _project_id, summary, runner = self.run_sample(smoke_task=True)
+        with tmp:
+            prompt = (Path(summary["run_dir"]) / "OPENHANDS_TASK_PROMPT.md").read_text()
+            self.assertIn(run_openhands_coder_task.SMOKE_EXPECTED_FILE, prompt)
+            self.assertIn("Do not run tests.", prompt)
+            self.assertIn("Finish immediately after writing the file.", prompt)
+            self.assertEqual(summary["prompt_source"], "smoke_task")
+            runner.assert_not_called()
+
+    def test_task_text_overrides_generated_prompt(self) -> None:
+        tmp, _root, _project_id, summary, _runner = self.run_sample(task_text="Write only this.\n")
+        with tmp:
+            prompt = (Path(summary["run_dir"]) / "OPENHANDS_TASK_PROMPT.md").read_text()
+            self.assertEqual(prompt, "Write only this.\n")
+            self.assertEqual(summary["prompt_source"], "task_text")
+
+    def test_task_file_overrides_generated_prompt(self) -> None:
+        tmp, root, project_id, _repo, worktree = self.make_sample_root()
+        task_file = root / "task.md"
+        task_file.write_text("File prompt.\n")
+        old_root = run_openhands_coder_task.ROOT
+        run_openhands_coder_task.ROOT = root
+        try:
+            summary = run_openhands_coder_task.generate(
+                project_id,
+                created_utc="20260605T120000Z",
+                worktree_path=str(worktree),
+                task_file=str(task_file),
+            )
+            prompt = (Path(summary["run_dir"]) / "OPENHANDS_TASK_PROMPT.md").read_text()
+            self.assertEqual(prompt, "File prompt.\n")
+            self.assertEqual(summary["prompt_source"], "task_file")
+        finally:
+            run_openhands_coder_task.ROOT = old_root
+            tmp.cleanup()
+
+    def test_simultaneous_override_options_are_rejected(self) -> None:
+        tmp, root, project_id, _repo, worktree = self.make_sample_root()
+        old_root = run_openhands_coder_task.ROOT
+        run_openhands_coder_task.ROOT = root
+        try:
+            with self.assertRaises(ValueError):
+                run_openhands_coder_task.generate(
+                    project_id,
+                    created_utc="20260605T120000Z",
+                    worktree_path=str(worktree),
+                    task_text="one",
+                    smoke_task=True,
+                )
+        finally:
+            run_openhands_coder_task.ROOT = old_root
+            tmp.cleanup()
 
     def test_canonical_repo_path_is_rejected_as_worktree(self) -> None:
         tmp, root, project_id, repo, _worktree = self.make_sample_root()
@@ -222,6 +301,35 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
             command_text = (Path(summary["run_dir"]) / "OPENHANDS_COMMAND.txt").read_text()
             self.assertIn("[refused:", command_text)
 
+    def test_smoke_status_passes_when_file_exists_and_canonical_repo_is_clean(self) -> None:
+        tmp, _root, _project_id, summary, runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            self.assertEqual(runner.call_count, 2)
+            smoke = json.loads((Path(summary["run_dir"]) / "OPENHANDS_SMOKE_STATUS.json").read_text())
+            self.assertEqual(smoke["status"], "pass")
+            self.assertTrue(smoke["expected_file_exists"])
+            self.assertTrue(smoke["canonical_repo_clean"])
+            self.assertEqual(smoke["returncode"], 0)
+            self.assertFalse(smoke["timed_out"])
+
+    def test_smoke_status_warns_when_timeout_occurs(self) -> None:
+        tmp, _root, _project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            timeout_on_run=True,
+        )
+        with tmp:
+            smoke = json.loads((Path(summary["run_dir"]) / "OPENHANDS_SMOKE_STATUS.json").read_text())
+            self.assertEqual(smoke["status"], "warn")
+            self.assertEqual(smoke["returncode"], 124)
+            self.assertTrue(smoke["timed_out"])
+
     def test_default_command_does_not_use_detached_tmux_session(self) -> None:
         tmp, _root, _project_id, summary, runner = self.run_sample()
         with tmp:
@@ -245,6 +353,50 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
                 validate_agent_run.ROOT = old_root
             self.assertEqual(recorder.failures(), [], json.dumps(recorder.failures(), indent=2))
             self.assertTrue(Path(summary["run_dir"]).exists())
+
+    def test_validation_parses_openhands_smoke_status(self) -> None:
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            old_root = validate_agent_run.ROOT
+            validate_agent_run.ROOT = root
+            try:
+                recorder = validate_agent_run.CheckRecorder()
+                validate_agent_run.validate_openhands_coder_artifacts(
+                    recorder,
+                    (root / "runs" / project_id / "latest_openhands_coder").resolve(),
+                )
+            finally:
+                validate_agent_run.ROOT = old_root
+            self.assertEqual(recorder.failures(), [], json.dumps(recorder.failures(), indent=2))
+            check_ids = {check["id"] for check in recorder.checks}
+            self.assertIn("openhands_smoke_status_parse", check_ids)
+            self.assertTrue(Path(summary["run_dir"]).exists())
+
+    def test_validation_fails_if_smoke_reports_canonical_repo_dirty(self) -> None:
+        tmp, root, project_id, summary, _runner = self.run_sample(smoke_task=True)
+        with tmp:
+            smoke_path = Path(summary["run_dir"]) / "OPENHANDS_SMOKE_STATUS.json"
+            smoke = json.loads(smoke_path.read_text())
+            smoke["canonical_repo_clean"] = False
+            smoke["status"] = "warn"
+            smoke_path.write_text(json.dumps(smoke) + "\n")
+            old_root = validate_agent_run.ROOT
+            validate_agent_run.ROOT = root
+            try:
+                recorder = validate_agent_run.CheckRecorder()
+                validate_agent_run.validate_openhands_coder_artifacts(
+                    recorder,
+                    (root / "runs" / project_id / "latest_openhands_coder").resolve(),
+                )
+            finally:
+                validate_agent_run.ROOT = old_root
+            failed_ids = {check["id"] for check in recorder.failures()}
+            self.assertIn("openhands_smoke_canonical_repo_clean", failed_ids)
 
     def test_generic_non_thomsonlint_helper_logic_still_works(self) -> None:
         tmp, root, project_id, repo, worktree = self.make_sample_root()
