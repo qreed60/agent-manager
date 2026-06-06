@@ -10,6 +10,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ORCHESTRATOR_ARTIFACT_POINTERS = ("latest_langgraph_v0", "latest_nightly_window")
 
 
 class CheckRecorder:
@@ -245,7 +246,137 @@ def validate_project_state(repo: Path, project: dict[str, Any], recorder: CheckR
     validate_json_artifact(recorder, "objective_backlog_parse", state_dir / "OBJECTIVE_BACKLOG.json")
 
 
-def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str, str]:
+def record_orchestrator_artifact_skip(
+    recorder: CheckRecorder,
+    pointer_name: str,
+    pointer: Path,
+    resolved_dirs: dict[str, str],
+) -> None:
+    if pointer.exists() or pointer.is_symlink():
+        try:
+            resolved = pointer.resolve()
+        except OSError:
+            resolved = pointer
+        if resolved.is_dir():
+            resolved_dirs[pointer_name] = str(resolved)
+    recorder.pass_check(
+        f"{pointer_name}_orchestrated_skip",
+        f"{pointer_name} validation skipped in orchestrated mode to avoid validating stale or current orchestrator artifacts",
+        path=pointer,
+        details={"skip_reason": "orchestrated_mode"},
+    )
+
+
+def validate_langgraph_pointer(recorder: CheckRecorder, langgraph_pointer: Path, resolved_dirs: dict[str, str]) -> None:
+    langgraph_dir = validate_latest_dir(recorder, "latest_langgraph_v0_dir", langgraph_pointer)
+    if langgraph_dir is None:
+        return
+
+    resolved_dirs["latest_langgraph_v0"] = str(langgraph_dir)
+    manifest = validate_json_artifact(
+        recorder,
+        "langgraph_manifest_parse",
+        langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
+    )
+    state = validate_json_artifact(
+        recorder,
+        "langgraph_state_final_parse",
+        langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
+    )
+    trace = validate_json_artifact(recorder, "langgraph_node_trace_parse", langgraph_dir / "LANGGRAPH_NODE_TRACE.json")
+    if manifest is not None:
+        validate_langgraph_status_or_safe_stop(
+            recorder,
+            "langgraph_manifest_status",
+            manifest,
+            langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
+            trace,
+        )
+    if state is not None:
+        validate_langgraph_status_or_safe_stop(
+            recorder,
+            "langgraph_state_final_status",
+            state,
+            langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
+        )
+    validate_text_artifact(recorder, "langgraph_report_readable", langgraph_dir / "LANGGRAPH_REPORT.md")
+    legacy_nodes = [
+        "load_project",
+        "collect_metrics",
+        "run_plain_runner_v0",
+        "run_manager_planning_pass",
+        "write_morning_report",
+        "validate_agent_run",
+        "finalize",
+    ]
+    expected_nodes = [
+        "load_project",
+        "collect_metrics",
+        "run_plain_runner_v0",
+        "run_manager_planning_pass",
+        "write_morning_report",
+        "validate_agent_run",
+        "run_readonly_review_agents",
+        "compile_model_routing_plan",
+        "prepare_human_approval_packet",
+        "finalize",
+    ]
+    phase15_nodes = [
+        "load_project",
+        "collect_metrics",
+        "run_plain_runner_v0",
+        "run_manager_planning_pass",
+        "write_morning_report",
+        "validate_agent_run",
+        "run_readonly_review_agents",
+        "compile_model_routing_plan",
+        "finalize",
+    ]
+    phase13_nodes = [
+        "load_project",
+        "collect_metrics",
+        "run_plain_runner_v0",
+        "run_manager_planning_pass",
+        "write_morning_report",
+        "validate_agent_run",
+        "run_readonly_review_agents",
+        "finalize",
+    ]
+    trace_nodes = [item.get("node") for item in trace] if isinstance(trace, list) else []
+    if trace_nodes in (expected_nodes, phase15_nodes, phase13_nodes, legacy_nodes):
+        recorder.pass_check("langgraph_node_order", "LangGraph node trace has the expected deterministic order", path=langgraph_dir)
+    else:
+        recorder.fail_check(
+            "langgraph_node_order",
+            "LangGraph node trace must match the deterministic v0 node order",
+            path=langgraph_dir / "LANGGRAPH_NODE_TRACE.json",
+            details={
+                "expected": expected_nodes,
+                "phase15_allowed": phase15_nodes,
+                "phase13_allowed": phase13_nodes,
+                "legacy_allowed": legacy_nodes,
+                "actual": trace_nodes,
+            },
+        )
+    if isinstance(manifest, dict) and manifest.get("safety", {}).get("deterministic_validation_authority_preserved") is True:
+        recorder.pass_check("langgraph_preserves_validation_authority", "LangGraph manifest preserves deterministic validation authority", path=langgraph_dir)
+    else:
+        recorder.fail_check(
+            "langgraph_preserves_validation_authority",
+            "LangGraph manifest must preserve deterministic validation authority",
+            path=langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
+        )
+    if isinstance(state, dict) and isinstance(state.get("artifacts"), dict):
+        recorder.pass_check("langgraph_state_artifact_refs", "LangGraph final state carries artifact references", path=langgraph_dir)
+    else:
+        recorder.fail_check(
+            "langgraph_state_artifact_refs",
+            "LangGraph final state must carry artifact references",
+            path=langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
+        )
+
+
+def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orchestrator_artifacts: bool = False) -> dict[str, str]:
     run_root = ROOT / "runs" / project_id
     resolved_dirs: dict[str, str] = {}
     validate_systemd_artifacts(recorder)
@@ -318,111 +449,10 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
         )
 
     langgraph_pointer = run_root / "latest_langgraph_v0"
-    if langgraph_pointer.exists() or langgraph_pointer.is_symlink():
-        langgraph_dir = validate_latest_dir(recorder, "latest_langgraph_v0_dir", langgraph_pointer)
-        if langgraph_dir is not None:
-            resolved_dirs["latest_langgraph_v0"] = str(langgraph_dir)
-            manifest = validate_json_artifact(
-                recorder,
-                "langgraph_manifest_parse",
-                langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
-            )
-            state = validate_json_artifact(
-                recorder,
-                "langgraph_state_final_parse",
-                langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
-            )
-            trace = validate_json_artifact(recorder, "langgraph_node_trace_parse", langgraph_dir / "LANGGRAPH_NODE_TRACE.json")
-            if manifest is not None:
-                validate_langgraph_status_or_safe_stop(
-                    recorder,
-                    "langgraph_manifest_status",
-                    manifest,
-                    langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
-                    trace,
-                )
-            if state is not None:
-                validate_langgraph_status_or_safe_stop(
-                    recorder,
-                    "langgraph_state_final_status",
-                    state,
-                    langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
-                )
-            validate_text_artifact(recorder, "langgraph_report_readable", langgraph_dir / "LANGGRAPH_REPORT.md")
-            legacy_nodes = [
-                "load_project",
-                "collect_metrics",
-                "run_plain_runner_v0",
-                "run_manager_planning_pass",
-                "write_morning_report",
-                "validate_agent_run",
-                "finalize",
-            ]
-            expected_nodes = [
-                "load_project",
-                "collect_metrics",
-                "run_plain_runner_v0",
-                "run_manager_planning_pass",
-                "write_morning_report",
-                "validate_agent_run",
-                "run_readonly_review_agents",
-                "compile_model_routing_plan",
-                "prepare_human_approval_packet",
-                "finalize",
-            ]
-            phase15_nodes = [
-                "load_project",
-                "collect_metrics",
-                "run_plain_runner_v0",
-                "run_manager_planning_pass",
-                "write_morning_report",
-                "validate_agent_run",
-                "run_readonly_review_agents",
-                "compile_model_routing_plan",
-                "finalize",
-            ]
-            phase13_nodes = [
-                "load_project",
-                "collect_metrics",
-                "run_plain_runner_v0",
-                "run_manager_planning_pass",
-                "write_morning_report",
-                "validate_agent_run",
-                "run_readonly_review_agents",
-                "finalize",
-            ]
-            trace_nodes = [item.get("node") for item in trace] if isinstance(trace, list) else []
-            if trace_nodes in (expected_nodes, phase15_nodes, phase13_nodes, legacy_nodes):
-                recorder.pass_check("langgraph_node_order", "LangGraph node trace has the expected deterministic order", path=langgraph_dir)
-            else:
-                recorder.fail_check(
-                    "langgraph_node_order",
-                    "LangGraph node trace must match the deterministic v0 node order",
-                    path=langgraph_dir / "LANGGRAPH_NODE_TRACE.json",
-                    details={
-                        "expected": expected_nodes,
-                        "phase15_allowed": phase15_nodes,
-                        "phase13_allowed": phase13_nodes,
-                        "legacy_allowed": legacy_nodes,
-                        "actual": trace_nodes,
-                    },
-                )
-            if isinstance(manifest, dict) and manifest.get("safety", {}).get("deterministic_validation_authority_preserved") is True:
-                recorder.pass_check("langgraph_preserves_validation_authority", "LangGraph manifest preserves deterministic validation authority", path=langgraph_dir)
-            else:
-                recorder.fail_check(
-                    "langgraph_preserves_validation_authority",
-                    "LangGraph manifest must preserve deterministic validation authority",
-                    path=langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
-                )
-            if isinstance(state, dict) and isinstance(state.get("artifacts"), dict):
-                recorder.pass_check("langgraph_state_artifact_refs", "LangGraph final state carries artifact references", path=langgraph_dir)
-            else:
-                recorder.fail_check(
-                    "langgraph_state_artifact_refs",
-                    "LangGraph final state must carry artifact references",
-                    path=langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
-                )
+    if skip_orchestrator_artifacts:
+        record_orchestrator_artifact_skip(recorder, "latest_langgraph_v0", langgraph_pointer, resolved_dirs)
+    elif langgraph_pointer.exists() or langgraph_pointer.is_symlink():
+        validate_langgraph_pointer(recorder, langgraph_pointer, resolved_dirs)
     else:
         recorder.pass_check("latest_langgraph_v0_optional", "latest_langgraph_v0 is absent; optional Phase 12 artifacts not validated", path=langgraph_pointer)
 
@@ -431,7 +461,11 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
         review_dir = validate_latest_dir(recorder, "latest_review_agents_dir", review_pointer)
         if review_dir is not None:
             resolved_dirs["latest_review_agents"] = str(review_dir)
-            validate_review_agent_artifacts(recorder, review_dir)
+            validate_review_agent_artifacts(
+                recorder,
+                review_dir,
+                allow_stale_validation_review_blocking=skip_orchestrator_artifacts,
+            )
     else:
         recorder.pass_check("latest_review_agents_optional", "latest_review_agents is absent; optional Phase 13 artifacts not validated", path=review_pointer)
 
@@ -445,7 +479,9 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
         recorder.pass_check("latest_model_routing_optional", "latest_model_routing is absent; optional Phase 15 artifacts not validated", path=model_routing_pointer)
 
     nightly_window_pointer = run_root / "latest_nightly_window"
-    if nightly_window_pointer.exists() or nightly_window_pointer.is_symlink():
+    if skip_orchestrator_artifacts:
+        record_orchestrator_artifact_skip(recorder, "latest_nightly_window", nightly_window_pointer, resolved_dirs)
+    elif nightly_window_pointer.exists() or nightly_window_pointer.is_symlink():
         nightly_window_dir = validate_latest_dir(recorder, "latest_nightly_window_dir", nightly_window_pointer)
         if nightly_window_dir is not None:
             resolved_dirs["latest_nightly_window"] = str(nightly_window_dir)
@@ -1191,7 +1227,24 @@ def validate_review_agent_report(
     return data
 
 
-def validate_review_agent_artifacts(recorder: CheckRecorder, review_dir: Path) -> None:
+def review_summary_blocks_only_validation_review(summary: dict[str, Any]) -> bool:
+    reports = summary.get("reports")
+    if not isinstance(reports, dict):
+        return False
+    blocking_agents = [
+        agent
+        for agent, report in reports.items()
+        if isinstance(report, dict) and report.get("blocking") is True
+    ]
+    return blocking_agents == ["validation_review"]
+
+
+def validate_review_agent_artifacts(
+    recorder: CheckRecorder,
+    review_dir: Path,
+    *,
+    allow_stale_validation_review_blocking: bool = False,
+) -> None:
     reports = [
         ("validation_review_parse", "VALIDATION_REVIEW", "validation_review"),
         ("sqa_review_parse", "SQA_REVIEW", "sqa_review"),
@@ -1210,6 +1263,18 @@ def validate_review_agent_artifacts(recorder: CheckRecorder, review_dir: Path) -
     summary = parsed.get("review_agents_summary")
     if isinstance(summary, dict) and summary.get("blocking") is False:
         recorder.pass_check("review_agents_summary_nonblocking", "Review agents summary is nonblocking", path=review_dir / "REVIEW_AGENTS_SUMMARY.json")
+    elif (
+        allow_stale_validation_review_blocking
+        and isinstance(summary, dict)
+        and summary.get("blocking") is True
+        and review_summary_blocks_only_validation_review(summary)
+    ):
+        recorder.pass_check(
+            "review_agents_summary_nonblocking",
+            "Stale review agents summary blocked only on validation_review; accepted in orchestrated validation mode",
+            path=review_dir / "REVIEW_AGENTS_SUMMARY.json",
+            details={"accepted_stale_validation_review_blocking": True},
+        )
     elif isinstance(summary, dict):
         recorder.fail_check("review_agents_summary_nonblocking", "Review agents summary must not be blocking for a valid run", path=review_dir / "REVIEW_AGENTS_SUMMARY.json")
 
@@ -1294,6 +1359,11 @@ def update_latest_validation(run_dir: Path, project_id: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate deterministic agent-manager run artifacts.")
     parser.add_argument("project_id")
+    parser.add_argument(
+        "--skip-orchestrator-artifacts",
+        action="store_true",
+        help="Skip latest_langgraph_v0 and latest_nightly_window checks for in-orchestrator validation.",
+    )
     args = parser.parse_args()
 
     created_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1307,7 +1377,18 @@ def main() -> None:
     if repo is not None and project is not None:
         validate_project_state(repo, project, recorder)
 
-    artifact_sources = validate_run_artifacts(args.project_id, recorder)
+    artifact_sources = validate_run_artifacts(
+        args.project_id,
+        recorder,
+        skip_orchestrator_artifacts=args.skip_orchestrator_artifacts,
+    )
+    validation_mode = {
+        "skip_orchestrator_artifacts": args.skip_orchestrator_artifacts,
+        "skipped_orchestrator_artifacts": list(ORCHESTRATOR_ARTIFACT_POINTERS) if args.skip_orchestrator_artifacts else [],
+        "skip_reason": "orchestrated mode avoids stale/current orchestrator artifact recursion"
+        if args.skip_orchestrator_artifacts
+        else None,
+    }
 
     report = {
         "schema_version": 1,
@@ -1318,6 +1399,7 @@ def main() -> None:
         "checks": recorder.checks,
         "failures": recorder.failures(),
         "artifact_sources": artifact_sources,
+        "validation_mode": validation_mode,
         "safety": {
             "no_openhands_execution": True,
             "no_model_calls": True,

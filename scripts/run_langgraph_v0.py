@@ -218,9 +218,10 @@ def make_command_node(
     *,
     reads: Callable[[LangGraphState], list[str]],
     produces: list[str],
+    extra_args: list[str] | None = None,
 ) -> Callable[[LangGraphState], LangGraphState]:
     def _node(state: LangGraphState) -> LangGraphState:
-        command = ["python3", script, state["project_id"]]
+        command = ["python3", script, state["project_id"], *(extra_args or [])]
         return run_command_node(state, node, command, artifacts_read=reads(state), produced_latest_names=produces)
 
     return _node
@@ -389,6 +390,7 @@ def build_graph() -> Any:
                 state.get("artifacts", {}).get("latest_morning_report", ""),
             ],
             produces=["latest_validation"],
+            extra_args=["--skip-orchestrator-artifacts"],
         ),
     )
     graph.add_node(

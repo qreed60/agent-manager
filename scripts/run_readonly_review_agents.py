@@ -213,13 +213,19 @@ def validation_review(project_id: str, created_utc: str, run_dir: Path, artifact
     status = report.get("status") if isinstance(report, dict) else None
     failures = report.get("failures") if isinstance(report, dict) else None
     failure_count = len(failures) if isinstance(failures, list) else 0
+    validation_mode = report.get("validation_mode") if isinstance(report, dict) else None
+    skipped_orchestrator_artifacts = (
+        validation_mode.get("skipped_orchestrator_artifacts")
+        if isinstance(validation_mode, dict) and validation_mode.get("skip_orchestrator_artifacts") is True
+        else []
+    )
     findings = [
         finding(
             "deterministic_validation_status",
             "info" if status == "pass" else "high",
             f"Deterministic validation status is {status!r}.",
             source="latest_validation/VALIDATION_REPORT.json",
-            details={"failure_count": failure_count},
+            details={"failure_count": failure_count, "skipped_orchestrator_artifacts": skipped_orchestrator_artifacts},
         )
     ]
     blocking = status != "pass"
@@ -232,7 +238,11 @@ def validation_review(project_id: str, created_utc: str, run_dir: Path, artifact
         blocking=blocking,
         findings=findings,
         artifacts_reviewed=reviewed_paths(project_id),
-        summary={"deterministic_validation_status": status, "failure_count": failure_count},
+        summary={
+            "deterministic_validation_status": status,
+            "failure_count": failure_count,
+            "skipped_orchestrator_artifacts": skipped_orchestrator_artifacts,
+        },
     )
 
 

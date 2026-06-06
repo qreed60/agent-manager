@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts import run_langgraph_v0
 
@@ -59,6 +60,41 @@ class LangGraphV0HelperTests(unittest.TestCase):
                 "prepare_human_approval_packet",
                 "finalize",
             ],
+        )
+
+    def test_validate_agent_run_node_uses_orchestrated_skip_flag(self) -> None:
+        state = run_langgraph_v0.initial_state(
+            "sample_project",
+            "20260605T000000Z",
+            Path("/tmp/langgraph_v0_test"),
+        )
+        state["artifacts"] = {
+            "latest": "/tmp/latest",
+            "latest_runner_v0": "/tmp/latest_runner_v0",
+            "latest_manager_plan": "/tmp/latest_manager_plan",
+            "latest_morning_report": "/tmp/latest_morning_report",
+        }
+        node = run_langgraph_v0.make_command_node(
+            "validate_agent_run",
+            "scripts/validate_agent_run.py",
+            reads=lambda current: [
+                current.get("artifacts", {}).get("latest", ""),
+                current.get("artifacts", {}).get("latest_runner_v0", ""),
+                current.get("artifacts", {}).get("latest_manager_plan", ""),
+                current.get("artifacts", {}).get("latest_morning_report", ""),
+            ],
+            produces=["latest_validation"],
+            extra_args=["--skip-orchestrator-artifacts"],
+        )
+
+        with mock.patch.object(run_langgraph_v0, "run_command_node") as mocked_run:
+            mocked_run.return_value = state
+            node(state)
+
+        command = mocked_run.call_args.args[2]
+        self.assertEqual(
+            command,
+            ["python3", "scripts/validate_agent_run.py", "sample_project", "--skip-orchestrator-artifacts"],
         )
 
 
