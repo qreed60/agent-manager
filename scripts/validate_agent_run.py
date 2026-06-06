@@ -415,7 +415,143 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
     else:
         recorder.pass_check("latest_human_approval_optional", "latest_human_approval is absent; optional Phase 17 artifacts not validated", path=human_approval_pointer)
 
+    ai_readonly_pointer = run_root / "latest_ai_readonly"
+    if ai_readonly_pointer.exists() or ai_readonly_pointer.is_symlink():
+        ai_readonly_dir = validate_latest_dir(recorder, "latest_ai_readonly_dir", ai_readonly_pointer)
+        if ai_readonly_dir is not None:
+            resolved_dirs["latest_ai_readonly"] = str(ai_readonly_dir)
+            validate_ai_readonly_artifacts(recorder, ai_readonly_dir)
+    else:
+        recorder.pass_check("latest_ai_readonly_optional", "latest_ai_readonly is absent; optional Phase 18A artifacts not validated", path=ai_readonly_pointer)
+
     return resolved_dirs
+
+
+def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:
+    """Validate Phase 18A AI read-only agent artifacts."""
+    required_json = [
+        ("ai_review_parse", "AI_READONLY_REVIEW.json"),
+        ("ai_response_parsed_parse", "AI_RESPONSE_PARSED.json"),
+        ("ai_safety_status_parse", "AI_SAFETY_STATUS.json"),
+        ("ai_readonly_summary_parse", "AI_READONLY_SUMMARY.json"),
+    ]
+    required_text = [
+        "AI_READONLY_REVIEW.md",
+        "AI_PROMPT.md",
+        "AI_RESPONSE_RAW.txt",
+        "AI_READONLY_SUMMARY.md",
+    ]
+
+    parsed: dict[str, Any] = {}
+    for check_id, filename in required_json:
+        data = validate_json_artifact(recorder, check_id, ai_dir / filename)
+        if data is not None:
+            parsed[filename] = data
+
+    for filename in required_text:
+        validate_text_artifact(recorder, f"{filename}_readable", ai_dir / filename)
+
+    # Validate AI_READONLY_REVIEW.json shape
+    review = parsed.get("AI_READONLY_REVIEW.json")
+    if isinstance(review, dict):
+        recorder.pass_check(
+            "ai_review_agent_role",
+            f"AI_READONLY_REVIEW.json agent is {review.get('agent', 'unknown')!r}",
+            path=ai_dir / "AI_READONLY_REVIEW.json",
+        )
+        status = review.get("status") if isinstance(review, dict) else None
+        # The review itself doesn't have a top-level status field in the same way;
+        # its recommendation is advisory. Check generated_by instead.
+        gen_by = review.get("generated_by")
+        if gen_by == "deterministic_scaffold":
+            recorder.pass_check(
+                "ai_review_generated_by",
+                "AI_READONLY_REVIEW.json generated_by is deterministic_scaffold",
+                path=ai_dir / "AI_READONLY_REVIEW.json",
+            )
+
+    # Validate AI_RESPONSE_PARSED.json shape
+    parsed_resp = parsed.get("AI_RESPONSE_PARSED.json")
+    if isinstance(parsed_resp, dict):
+        resp_status = parsed_resp.get("status")
+        if resp_status in ("pass", "warn", "fail"):
+            recorder.pass_check(
+                "ai_response_parsed_status_valid",
+                f"AI_RESPONSE_PARSED.json status is {resp_status!r}",
+                path=ai_dir / "AI_RESPONSE_PARSED.json",
+            )
+        else:
+            recorder.fail_check(
+                "ai_response_parsed_status_valid",
+                f"AI_RESPONSE_PARSED.json status must be pass, warn, or fail; found {resp_status!r}",
+                path=ai_dir / "AI_RESPONSE_PARSED.json",
+            )
+
+    # Validate AI_SAFETY_STATUS.json — deny dangerous operations
+    safety = parsed.get("AI_SAFETY_STATUS.json")
+    if isinstance(safety, dict):
+        dangerous_checks = [
+            ("source_writes_allowed", False),
+            ("openhands_execution_allowed", False),
+            ("auto_push_allowed", False),
+            ("auto_merge_allowed", False),
+            ("pr_creation_allowed", False),
+        ]
+        for key, expected in dangerous_checks:
+            actual = safety.get(key)
+            if actual == expected:
+                recorder.pass_check(
+                    f"ai_safety_{key}",
+                    f"safety_status.{key} is {expected}",
+                    path=ai_dir / "AI_SAFETY_STATUS.json",
+                )
+            else:
+                recorder.fail_check(
+                    f"ai_safety_{key}",
+                    f"safety_status.{key} must be {expected}; found {actual!r}. This is a blocking safety violation.",
+                    path=ai_dir / "AI_SAFETY_STATUS.json",
+                )
+
+        # Validate model_call_performed is boolean or null
+        mcp = safety.get("model_call_performed")
+        if isinstance(mcp, bool):
+            recorder.pass_check(
+                "ai_safety_model_call_performed_bool",
+                f"safety_status.model_call_performed is {mcp}",
+                path=ai_dir / "AI_SAFETY_STATUS.json",
+            )
+        else:
+            recorder.fail_check(
+                "ai_safety_model_call_performed_bool",
+                f"safety_status.model_call_performed must be boolean; found {mcp!r}",
+                path=ai_dir / "AI_SAFETY_STATUS.json",
+            )
+
+    # Validate AI_READONLY_SUMMARY.json shape
+    summary = parsed.get("AI_READONLY_SUMMARY.json")
+    if isinstance(summary, dict):
+        gen_by = summary.get("generated_by")
+        if gen_by == "phase18a_ai_readonly_agent":
+            recorder.pass_check(
+                "ai_summary_generated_by",
+                "AI_READONLY_SUMMARY.json generated_by is phase18a_ai_readonly_agent",
+                path=ai_dir / "AI_READONLY_SUMMARY.json",
+            )
+        else:
+            recorder.fail_check(
+                "ai_summary_generated_by",
+                f"AI_READONLY_SUMMARY.json generated_by must be 'phase18a_ai_readonly_agent'; found {gen_by!r}",
+                path=ai_dir / "AI_READONLY_SUMMARY.json",
+            )
+
+        # Model call is optional — just validate it's boolean if present
+        mcp = summary.get("model_call_performed")
+        if isinstance(mcp, bool):
+            recorder.pass_check(
+                "ai_summary_model_call_performed_bool",
+                f"summary model_call_performed is {mcp}",
+                path=ai_dir / "AI_READONLY_SUMMARY.json",
+            )
 
 
 def validate_human_approval_artifacts(recorder: CheckRecorder, approval_dir: Path) -> None:
