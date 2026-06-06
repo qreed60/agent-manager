@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenHands Coder Run",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "created_utc",
+    "generated_by",
+    "status",
+    "objective",
+    "canonical_repo",
+    "worktree_path",
+    "worktree_git_branch",
+    "command_argv_redacted",
+    "execution_performed"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "created_utc": { "type": "string", "minLength": 1 },
+    "generated_by": { "const": "phase18b_controlled_openhands_coder_execution" },
+    "status": { "enum": ["pass", "warn", "fail"] },
+    "objective": { "type": "object" },
+    "canonical_repo": { "type": "string", "minLength": 1 },
+    "worktree_path": { "type": "string", "minLength": 1 },
+    "worktree_git_branch": { "type": "string", "minLength": 1 },
+    "artifacts_read": { "type": "object" },
+    "env_summary": { "type": "object" },
+    "command_argv_redacted": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "execution_performed": { "type": "boolean" },
+    "required_artifacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

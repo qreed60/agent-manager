@@ -132,6 +132,40 @@ def validate_latest_dir(recorder: CheckRecorder, check_id: str, path: Path) -> P
     return resolved
 
 
+def langgraph_safe_no_nonwrite_objective(data: Any) -> bool:
+    try:
+        payload = json.dumps(data)
+    except TypeError:
+        payload = str(data)
+    if isinstance(data, dict) and data.get("status") not in {None, "fail"}:
+        return False
+    return "no safe non-write active/queued objective available" in payload
+
+
+def validate_langgraph_status_or_safe_stop(
+    recorder: CheckRecorder,
+    check_id: str,
+    data: Any,
+    path: Path,
+    context: Any | None = None,
+) -> None:
+    status = data.get("status") if isinstance(data, dict) else None
+    if status == "pass":
+        recorder.pass_check(check_id, f"{path.name} status is pass", path=path)
+    elif langgraph_safe_no_nonwrite_objective(data) or langgraph_safe_no_nonwrite_objective(context):
+        recorder.pass_check(
+            check_id,
+            f"{path.name} recorded an expected safe stop with no non-write objective available",
+            path=path,
+        )
+    else:
+        recorder.fail_check(
+            check_id,
+            f"{path.name} status must be pass or an expected safe no-non-write-objective stop; found {status!r}",
+            path=path,
+        )
+
+
 def load_project(project_id: str, recorder: CheckRecorder) -> dict[str, Any] | None:
     config_path = ROOT / "configs" / "projects.json"
     data, err = load_json_file(config_path)
@@ -292,15 +326,28 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
                 recorder,
                 "langgraph_manifest_parse",
                 langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
-                required_status="pass",
             )
             state = validate_json_artifact(
                 recorder,
                 "langgraph_state_final_parse",
                 langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
-                required_status="pass",
             )
             trace = validate_json_artifact(recorder, "langgraph_node_trace_parse", langgraph_dir / "LANGGRAPH_NODE_TRACE.json")
+            if manifest is not None:
+                validate_langgraph_status_or_safe_stop(
+                    recorder,
+                    "langgraph_manifest_status",
+                    manifest,
+                    langgraph_dir / "LANGGRAPH_RUN_MANIFEST.json",
+                    trace,
+                )
+            if state is not None:
+                validate_langgraph_status_or_safe_stop(
+                    recorder,
+                    "langgraph_state_final_status",
+                    state,
+                    langgraph_dir / "LANGGRAPH_STATE_FINAL.json",
+                )
             validate_text_artifact(recorder, "langgraph_report_readable", langgraph_dir / "LANGGRAPH_REPORT.md")
             legacy_nodes = [
                 "load_project",
@@ -424,7 +471,125 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder) -> dict[str
     else:
         recorder.pass_check("latest_ai_readonly_optional", "latest_ai_readonly is absent; optional Phase 18A artifacts not validated", path=ai_readonly_pointer)
 
+    openhands_coder_pointer = run_root / "latest_openhands_coder"
+    if openhands_coder_pointer.exists() or openhands_coder_pointer.is_symlink():
+        openhands_coder_dir = validate_latest_dir(recorder, "latest_openhands_coder_dir", openhands_coder_pointer)
+        if openhands_coder_dir is not None:
+            resolved_dirs["latest_openhands_coder"] = str(openhands_coder_dir)
+            validate_openhands_coder_artifacts(recorder, openhands_coder_dir)
+    else:
+        recorder.pass_check(
+            "latest_openhands_coder_optional",
+            "latest_openhands_coder is absent; optional Phase 18B artifacts not validated",
+            path=openhands_coder_pointer,
+        )
+
     return resolved_dirs
+
+
+def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path) -> None:
+    """Validate Phase 18B controlled OpenHands coder artifacts."""
+    required_json = [
+        ("openhands_coder_run_parse", "OPENHANDS_CODER_RUN.json"),
+        ("openhands_exit_status_parse", "OPENHANDS_EXIT_STATUS.json"),
+        ("openhands_safety_status_parse", "OPENHANDS_SAFETY_STATUS.json"),
+        ("openhands_coder_summary_parse", "OPENHANDS_CODER_SUMMARY.json"),
+    ]
+    required_text = [
+        "OPENHANDS_CODER_RUN.md",
+        "OPENHANDS_TASK_PROMPT.md",
+        "OPENHANDS_COMMAND.txt",
+        "OPENHANDS_STDOUT.txt",
+        "OPENHANDS_STDERR.txt",
+        "OPENHANDS_WORKTREE_STATUS_BEFORE.txt",
+        "OPENHANDS_WORKTREE_STATUS_AFTER.txt",
+        "OPENHANDS_DIFF_SUMMARY.txt",
+        "OPENHANDS_CODER_SUMMARY.md",
+    ]
+
+    parsed: dict[str, Any] = {}
+    for check_id, filename in required_json:
+        data = validate_json_artifact(recorder, check_id, coder_dir / filename)
+        if data is not None:
+            parsed[filename] = data
+    for filename in required_text:
+        validate_text_artifact(recorder, f"{filename}_readable", coder_dir / filename)
+
+    safety = parsed.get("OPENHANDS_SAFETY_STATUS.json")
+    if isinstance(safety, dict):
+        dangerous_checks = [
+            ("canonical_repo_writes_allowed", False),
+            ("auto_push_allowed", False),
+            ("auto_merge_allowed", False),
+            ("auto_commit_allowed", False),
+            ("pr_creation_allowed", False),
+        ]
+        for key, expected in dangerous_checks:
+            actual = safety.get(key)
+            if actual == expected:
+                recorder.pass_check(
+                    f"openhands_safety_{key}",
+                    f"safety_status.{key} is {expected}",
+                    path=coder_dir / "OPENHANDS_SAFETY_STATUS.json",
+                )
+            else:
+                recorder.fail_check(
+                    f"openhands_safety_{key}",
+                    f"safety_status.{key} must be {expected}; found {actual!r}. This is a blocking safety violation.",
+                    path=coder_dir / "OPENHANDS_SAFETY_STATUS.json",
+                )
+        dry_run = safety.get("dry_run")
+        if isinstance(dry_run, bool):
+            recorder.pass_check(
+                "openhands_safety_dry_run_bool",
+                f"safety_status.dry_run is {dry_run}",
+                path=coder_dir / "OPENHANDS_SAFETY_STATUS.json",
+            )
+        else:
+            recorder.fail_check(
+                "openhands_safety_dry_run_bool",
+                f"safety_status.dry_run must be boolean; found {dry_run!r}",
+                path=coder_dir / "OPENHANDS_SAFETY_STATUS.json",
+            )
+        if safety.get("secrets_redacted") is True:
+            recorder.pass_check("openhands_safety_secrets_redacted", "safety_status.secrets_redacted is true", path=coder_dir / "OPENHANDS_SAFETY_STATUS.json")
+        else:
+            recorder.fail_check("openhands_safety_secrets_redacted", "safety_status.secrets_redacted must be true", path=coder_dir / "OPENHANDS_SAFETY_STATUS.json")
+
+    run_record = parsed.get("OPENHANDS_CODER_RUN.json")
+    if isinstance(run_record, dict):
+        required = {"project_id", "created_utc", "generated_by", "worktree_path", "worktree_git_branch", "command_argv_redacted"}
+        missing = sorted(required - set(run_record))
+        if not missing:
+            recorder.pass_check("openhands_run_required_fields", "OPENHANDS_CODER_RUN.json has required fields", path=coder_dir / "OPENHANDS_CODER_RUN.json")
+        else:
+            recorder.fail_check(
+                "openhands_run_required_fields",
+                "OPENHANDS_CODER_RUN.json is missing required fields",
+                path=coder_dir / "OPENHANDS_CODER_RUN.json",
+                details={"missing": missing},
+            )
+        command = run_record.get("command_argv_redacted")
+        if isinstance(command, list) and "--override-with-envs" in command:
+            recorder.pass_check("openhands_command_override_envs", "OpenHands command includes --override-with-envs", path=coder_dir / "OPENHANDS_CODER_RUN.json")
+        else:
+            recorder.fail_check("openhands_command_override_envs", "OpenHands command must include --override-with-envs", path=coder_dir / "OPENHANDS_CODER_RUN.json")
+
+    exit_status = parsed.get("OPENHANDS_EXIT_STATUS.json")
+    if isinstance(exit_status, dict):
+        status = exit_status.get("status")
+        if status in {"pass", "warn", "fail"}:
+            recorder.pass_check("openhands_exit_status_value", f"OPENHANDS_EXIT_STATUS.json status is {status!r}", path=coder_dir / "OPENHANDS_EXIT_STATUS.json")
+        else:
+            recorder.fail_check("openhands_exit_status_value", f"OPENHANDS_EXIT_STATUS.json status must be pass, warn, or fail; found {status!r}", path=coder_dir / "OPENHANDS_EXIT_STATUS.json")
+
+    summary = parsed.get("OPENHANDS_CODER_SUMMARY.json")
+    if isinstance(summary, dict):
+        gen_by = summary.get("generated_by")
+        if gen_by == "phase18b_controlled_openhands_coder_execution":
+            recorder.pass_check("openhands_summary_generated_by", "OPENHANDS_CODER_SUMMARY.json generated_by is phase18b", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
+        else:
+            recorder.fail_check("openhands_summary_generated_by", f"OPENHANDS_CODER_SUMMARY.json generated_by must be phase18b_controlled_openhands_coder_execution; found {gen_by!r}", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:
