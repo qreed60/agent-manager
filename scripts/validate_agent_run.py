@@ -637,6 +637,10 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
         required_fields = {
             "smoke_task",
             "expected_file",
+            "worktree_path",
+            "expected_file_absolute_path",
+            "run_dir",
+            "misplaced_file_paths",
             "expected_file_exists",
             "canonical_repo_clean",
             "returncode",
@@ -656,6 +660,10 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
         field_types = {
             "smoke_task": bool,
             "expected_file": str,
+            "worktree_path": str,
+            "expected_file_absolute_path": str,
+            "run_dir": str,
+            "misplaced_file_paths": list,
             "expected_file_exists": bool,
             "canonical_repo_clean": bool,
             "returncode": int,
@@ -685,6 +693,16 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
                 "Smoke task must not write to the canonical repo; canonical_repo_clean must be true",
                 path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
             )
+        misplaced = smoke.get("misplaced_file_paths")
+        if isinstance(misplaced, list) and misplaced:
+            recorder.pass_check(
+                "openhands_smoke_misplaced_file_paths",
+                "Smoke task reported misplaced smoke files for review",
+                path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
+                details={"misplaced_file_paths": misplaced},
+            )
+        elif isinstance(misplaced, list):
+            recorder.pass_check("openhands_smoke_no_misplaced_file_paths", "Smoke task reported no misplaced smoke files", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:

@@ -335,14 +335,25 @@ def truncate_prompt(prompt: str, max_prompt_chars: int) -> str:
 def build_smoke_prompt() -> str:
     return f"""# OpenHands Smoke Task
 
-Create `{SMOKE_EXPECTED_FILE}` and write one short sentence confirming smoke completion.
+The current shell working directory is the isolated worktree. Create the smoke
+file relative to the current working directory only.
+
+Do not create the file beside `OPENHANDS_TASK_PROMPT.md`.
+Do not use the run directory.
+
+Use this exact command or an equivalent command:
+
+```bash
+mkdir -p .agent_manager_scratch
+printf '%s\\n' 'OpenHands smoke test completed.' > {SMOKE_EXPECTED_FILE}
+```
 
 Boundaries:
 - Do not inspect the repository broadly.
 - Do not run tests.
 - Do not commit.
 - Do not push.
-- Finish immediately after writing the file.
+- Finish immediately after that.
 """
 
 
@@ -368,6 +379,16 @@ def resolve_prompt(
     if smoke_task:
         return truncate_prompt(build_smoke_prompt(), max_prompt_chars), "smoke_task"
     return generated_prompt, "generated"
+
+
+def misplaced_smoke_file_paths(*, worktree: Path, run_dir: Path) -> list[str]:
+    expected = (worktree / SMOKE_EXPECTED_FILE).resolve()
+    candidates = [run_dir / SMOKE_EXPECTED_FILE]
+    misplaced: list[str] = []
+    for candidate in candidates:
+        if candidate.exists() and candidate.resolve() != expected:
+            misplaced.append(str(candidate))
+    return misplaced
 
 
 def openhands_base_command(openhands_command: str) -> list[str]:
@@ -643,6 +664,7 @@ def generate(
     canonical_repo_clean = not canonical_repo_status.strip()
     expected_smoke_file = worktree / SMOKE_EXPECTED_FILE
     expected_smoke_file_exists = expected_smoke_file.exists()
+    misplaced_paths = misplaced_smoke_file_paths(worktree=worktree, run_dir=run_dir)
 
     exit_status = {
         "schema_version": 1,
@@ -699,6 +721,7 @@ def generate(
             and not timed_out
             and expected_smoke_file_exists
             and canonical_repo_clean
+            and not misplaced_paths
         )
         smoke_status = {
             "schema_version": 1,
@@ -706,6 +729,10 @@ def generate(
             "created_utc": created,
             "smoke_task": True,
             "expected_file": SMOKE_EXPECTED_FILE,
+            "worktree_path": str(worktree),
+            "expected_file_absolute_path": str(expected_smoke_file),
+            "run_dir": str(run_dir),
+            "misplaced_file_paths": misplaced_paths,
             "expected_file_exists": expected_smoke_file_exists,
             "canonical_repo_clean": canonical_repo_clean,
             "returncode": returncode,
@@ -714,6 +741,8 @@ def generate(
             "status": "pass" if smoke_passed else ("fail" if not canonical_repo_clean else "warn"),
         }
         summary["smoke_status"] = smoke_status["status"]
+        if smoke_status["status"] != "pass":
+            summary["status"] = smoke_status["status"]
 
     (run_dir / "OPENHANDS_COMMAND.txt").write_text(shlex.join(command) + "\n")
     (run_dir / "OPENHANDS_STDOUT.txt").write_text(stdout)

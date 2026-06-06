@@ -98,6 +98,7 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         task_file: str | None = None,
         smoke_task: bool = False,
         write_smoke_file: bool = False,
+        write_misplaced_smoke_file: bool = False,
         timeout_on_run: bool = False,
     ) -> tuple[tempfile.TemporaryDirectory[str], Path, str, dict, MagicMock]:
         tmp, root, project_id, _repo, worktree = self.make_sample_root()
@@ -111,6 +112,11 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
             if write_smoke_file:
                 cwd = Path(str(kwargs["cwd"]))
                 smoke_file = cwd / run_openhands_coder_task.SMOKE_EXPECTED_FILE
+                smoke_file.parent.mkdir(parents=True, exist_ok=True)
+                smoke_file.write_text("OpenHands smoke task completed.\n")
+            if write_misplaced_smoke_file:
+                prompt_path = Path(command[command.index("--file") + 1])
+                smoke_file = prompt_path.parent / run_openhands_coder_task.SMOKE_EXPECTED_FILE
                 smoke_file.parent.mkdir(parents=True, exist_ok=True)
                 smoke_file.write_text("OpenHands smoke task completed.\n")
             return subprocess.CompletedProcess(command, 0, "ok", "")
@@ -168,8 +174,17 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         with tmp:
             prompt = (Path(summary["run_dir"]) / "OPENHANDS_TASK_PROMPT.md").read_text()
             self.assertIn(run_openhands_coder_task.SMOKE_EXPECTED_FILE, prompt)
+            self.assertIn("current shell working directory is the isolated worktree", prompt)
+            self.assertIn("relative to the current working directory only", prompt)
+            self.assertIn("Do not create the file beside `OPENHANDS_TASK_PROMPT.md`.", prompt)
+            self.assertIn("Do not use the run directory.", prompt)
+            self.assertIn("mkdir -p .agent_manager_scratch", prompt)
+            self.assertIn(
+                "printf '%s\\n' 'OpenHands smoke test completed.' > .agent_manager_scratch/OPENHANDS_SMOKE_TEST.md",
+                prompt,
+            )
             self.assertIn("Do not run tests.", prompt)
-            self.assertIn("Finish immediately after writing the file.", prompt)
+            self.assertIn("Finish immediately after that.", prompt)
             self.assertEqual(summary["prompt_source"], "smoke_task")
             runner.assert_not_called()
 
@@ -312,10 +327,40 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
             self.assertEqual(runner.call_count, 2)
             smoke = json.loads((Path(summary["run_dir"]) / "OPENHANDS_SMOKE_STATUS.json").read_text())
             self.assertEqual(smoke["status"], "pass")
+            self.assertEqual(summary["status"], "pass")
             self.assertTrue(smoke["expected_file_exists"])
             self.assertTrue(smoke["canonical_repo_clean"])
+            self.assertEqual(smoke["misplaced_file_paths"], [])
+            self.assertTrue(smoke["expected_file_absolute_path"].endswith(run_openhands_coder_task.SMOKE_EXPECTED_FILE))
             self.assertEqual(smoke["returncode"], 0)
             self.assertFalse(smoke["timed_out"])
+
+    def test_smoke_status_warns_when_file_is_misplaced_in_run_dir(self) -> None:
+        tmp, _root, _project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_misplaced_smoke_file=True,
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            smoke = json.loads((run_dir / "OPENHANDS_SMOKE_STATUS.json").read_text())
+            self.assertEqual(smoke["status"], "warn")
+            self.assertEqual(summary["status"], "warn")
+            self.assertFalse(smoke["expected_file_exists"])
+            self.assertEqual(smoke["misplaced_file_paths"], [str(run_dir / run_openhands_coder_task.SMOKE_EXPECTED_FILE)])
+
+    def test_smoke_summary_status_follows_smoke_status(self) -> None:
+        tmp, _root, _project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_misplaced_smoke_file=True,
+        )
+        with tmp:
+            summary_json = json.loads((Path(summary["run_dir"]) / "OPENHANDS_CODER_SUMMARY.json").read_text())
+            self.assertEqual(summary_json["smoke_status"], "warn")
+            self.assertEqual(summary_json["status"], "warn")
 
     def test_smoke_status_warns_when_timeout_occurs(self) -> None:
         tmp, _root, _project_id, summary, _runner = self.run_sample(
@@ -327,6 +372,7 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         with tmp:
             smoke = json.loads((Path(summary["run_dir"]) / "OPENHANDS_SMOKE_STATUS.json").read_text())
             self.assertEqual(smoke["status"], "warn")
+            self.assertEqual(summary["status"], "warn")
             self.assertEqual(smoke["returncode"], 124)
             self.assertTrue(smoke["timed_out"])
 

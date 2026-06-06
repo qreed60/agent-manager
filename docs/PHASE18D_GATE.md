@@ -39,7 +39,18 @@ The prompt asks OpenHands to create only:
 .agent_manager_scratch/OPENHANDS_SMOKE_TEST.md
 ```
 
-and then finish immediately.
+relative to the current shell working directory, which must be the isolated
+worktree. It must not create the file beside `OPENHANDS_TASK_PROMPT.md` and must
+not use the run artifact directory.
+
+The intended command is:
+
+```bash
+mkdir -p .agent_manager_scratch
+printf '%s\n' 'OpenHands smoke test completed.' > .agent_manager_scratch/OPENHANDS_SMOKE_TEST.md
+```
+
+OpenHands should finish immediately after that.
 
 ## Pass Criteria
 
@@ -50,10 +61,13 @@ and then finish immediately.
 - The run did not time out.
 - `.agent_manager_scratch/OPENHANDS_SMOKE_TEST.md` exists in the isolated
   worktree.
+- No smoke file was found in the run artifact directory.
 - The canonical project repo is clean.
 
 Validation accepts smoke `pass` and `warn` states for general review, but fails
 if the smoke artifact reports that the canonical repo is not clean.
+Smoke status is `warn` when the live command exits but the smoke file is missing
+from the worktree or appears in a misplaced location such as the run directory.
 
 ## Not Phase 19
 
