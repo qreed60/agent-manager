@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATED_BY = "phase18b_controlled_openhands_coder_execution"
+GENERATED_BY = "phase18e_fresh_worktree_and_scope_guard"
 DEFAULT_ENV_FILE = Path.home() / ".config" / "agent-manager" / "env.local"
 OPENHANDS_ENV_NAMES = [
     "LLM_BASE_URL",
@@ -44,6 +44,9 @@ REQUIRED_ARTIFACTS = [
     "OPENHANDS_DIFF_SUMMARY.txt",
     "OPENHANDS_CODER_SUMMARY.json",
     "OPENHANDS_CODER_SUMMARY.md",
+    "OPENHANDS_WORKTREE_INFO.json",
+    "OPENHANDS_CHANGED_FILES.json",
+    "OPENHANDS_SCOPE_STATUS.json",
 ]
 ARTIFACT_POINTERS: dict[str, tuple[str, ...]] = {
     "latest_human_approval": ("APPROVAL_SUMMARY.json", "APPROVAL_PACKET.json"),
@@ -63,6 +66,7 @@ ARTIFACT_POINTERS: dict[str, tuple[str, ...]] = {
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 OPENHANDS_CAPABILITY_TIMEOUT_SECONDS = 30
 SMOKE_EXPECTED_FILE = ".agent_manager_scratch/OPENHANDS_SMOKE_TEST.md"
+SMOKE_ALLOWED_FILES = [SMOKE_EXPECTED_FILE]
 
 
 class OpenHandsCommandError(RuntimeError):
@@ -270,6 +274,187 @@ def update_latest_symlink(run_dir: Path, project_id: str) -> None:
     if latest.exists() or latest.is_symlink():
         latest.unlink()
     latest.symlink_to(run_dir, target_is_directory=True)
+
+
+def create_fresh_openhands_worktree(
+    project_id: str,
+    canonical_repo: Path,
+    created_utc: str,
+) -> dict[str, Any]:
+    """Create a fresh git worktree for this OpenHands run.
+
+    Returns worktree metadata for artifact recording.
+    """
+    canonical = canonical_repo.expanduser().resolve()
+    worktree_root = (ROOT / "worktrees" / project_id).resolve()
+    worktree_root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = created_utc.replace("T", "_").replace("Z", "")
+    worktree_dir = (worktree_root / f"openhands_coder_{created_utc}").resolve()
+    branch_name = f"agent-manager/{project_id}/openhands-coder-{timestamp}"
+    base_branch = git_output(["branch", "--show-current"], canonical).strip() or "HEAD"
+
+    if worktree_dir.exists():
+        raise SystemExit(f"fresh OpenHands worktree path already exists: {worktree_dir}")
+
+    result = run_git(["worktree", "add", "-b", branch_name, str(worktree_dir), "HEAD"], canonical)
+    if result.returncode != 0:
+        raise SystemExit(f"could not create fresh OpenHands worktree: {result.stderr.strip() or result.stdout.strip()}")
+
+    return {
+        "worktree_path": worktree_dir,
+        "worktree_branch": branch_name,
+        "base_branch": base_branch,
+        "worktree_head": git_output(["rev-parse", "HEAD"], worktree_dir).strip(),
+        "worktree_created": True,
+        "reused_existing_worktree": False,
+        "status": "active",
+    }
+
+
+def detect_changed_files(worktree: Path) -> dict[str, Any]:
+    """Detect changed files in the worktree including untracked files."""
+    # git status --short --untracked-files=all
+    status_result = run_git(["status", "--short", "--untracked-files=all"], worktree)
+    short_status = status_result.stdout if status_result.returncode == 0 else ""
+
+    # git diff --name-only (unstaged tracked changes)
+    diff_result = run_git(["diff", "--name-only"], worktree)
+    unstaged_tracked = (
+        [f for f in diff_result.stdout.strip().split("\n") if f]
+        if diff_result.returncode == 0
+        else []
+    )
+
+    # git diff --cached --name-only (staged changes)
+    staged_result = run_git(["diff", "--cached", "--name-only"], worktree)
+    staged_files = (
+        [f for f in staged_result.stdout.strip().split("\n") if f]
+        if staged_result.returncode == 0
+        else []
+    )
+
+    # Parse short status for untracked files and tracked modifications
+    tracked_modified = []
+    untracked = []
+    for line in short_status.strip().split("\n"):
+        if not line:
+            continue
+        # Format: XY filename (X=index, Y=working tree)
+        if len(line) >= 3:
+            status_chars = line[:2]
+            filename = line[3:].strip()
+            if status_chars == "??" and filename:
+                untracked.append(filename)
+            elif (status_chars[0] != " " or status_chars[1] != " ") and filename:
+                tracked_modified.append(filename)
+
+    all_changed = sorted(set(unstaged_tracked + staged_files + tracked_modified + untracked))
+    worktree_changed = bool(all_changed)
+
+    return {
+        "tracked_modified_files": sorted(set(tracked_modified)),
+        "staged_files": sorted(set(staged_files)),
+        "untracked_files": sorted(set(untracked)),
+        "all_changed_files": all_changed,
+        "worktree_changed": worktree_changed,
+    }
+
+
+def compute_scope_status(
+    *,
+    smoke_task: bool,
+    objective: dict[str, Any],
+    changed_files: list[str],
+    canonical_repo_clean: bool,
+) -> dict[str, Any]:
+    """Compute scope guard status for the OpenHands run."""
+    if smoke_task:
+        allowed = SMOKE_ALLOWED_FILES
+        task_type = "smoke"
+    else:
+        allowed_raw = objective.get("allowed_files")
+        if isinstance(allowed_raw, list) and len(allowed_raw) > 0:
+            allowed = [str(f) for f in allowed_raw]
+            task_type = "non-smoke"
+        else:
+            if not changed_files:
+                status = "warn" if objective.get("write_capable") is True else "pass"
+                details = (
+                    "no allowed_files available for non-smoke write-capable task; scope cannot be verified"
+                    if status == "warn"
+                    else "no changed files detected"
+                )
+                return {
+                    "schema_version": 1,
+                    "project_id": "",
+                    "created_utc": "",
+                    "task_type": "non-smoke",
+                    "allowed_files": [],
+                    "changed_files": [],
+                    "scope_status": status,
+                    "details": details,
+                }
+            return {
+                "schema_version": 1,
+                "project_id": "",
+                "created_utc": "",
+                "task_type": "non-smoke",
+                "allowed_files": [],
+                "changed_files": changed_files,
+                "scope_status": "warn",
+                "details": "no allowed_files available for non-smoke write-capable task; scope cannot be verified",
+            }
+
+    if not changed_files:
+        return {
+            "schema_version": 1,
+            "project_id": "",
+            "created_utc": "",
+            "task_type": task_type,
+            "allowed_files": allowed,
+            "changed_files": [],
+            "scope_status": "fail" if not canonical_repo_clean else "pass",
+            "details": "canonical repo is dirty" if not canonical_repo_clean else "no changed files detected",
+        }
+
+    violations = []
+    for f in changed_files:
+        matched = any(f == allowed_path or f.startswith(allowed_path + "/") for allowed_path in allowed)
+        protected = (
+            f == ".git"
+            or f.startswith(".git/")
+            or f.startswith("generated_exports/")
+            or f.startswith("exports/")
+            or f.startswith(".agent_manager/")
+        )
+        if protected and not matched:
+            violations.append(f"protected path outside scope: {f}")
+            continue
+        if not matched:
+            violations.append(f"file outside scope: {f}")
+
+    # Determine status
+    if not canonical_repo_clean:
+        scope_status = "fail"
+        details = "canonical repo is dirty"
+    elif violations:
+        scope_status = "fail"
+        details = "; ".join(violations)
+    else:
+        scope_status = "pass"
+        details = "all changed files within allowed scope"
+
+    return {
+        "schema_version": 1,
+        "project_id": "",
+        "created_utc": "",
+        "task_type": task_type,
+        "allowed_files": allowed,
+        "changed_files": changed_files,
+        "scope_status": scope_status,
+        "details": details,
+    }
 
 
 def build_prompt(
@@ -556,10 +741,36 @@ def generate(
 ) -> dict[str, Any]:
     created = created_utc or utc_now()
     project = load_project(project_id)
-    canonical_repo = Path(str(project["repo_path"]))
-    worktree = ensure_worktree_allowed(project_id, resolve_worktree_path(project_id, worktree_path), canonical_repo)
-    if not worktree.exists():
-        raise SystemExit(f"worktree path does not exist: {worktree}")
+    canonical_repo = Path(str(project["repo_path"])).expanduser().resolve()
+
+    env_for_safety = dict(os.environ)
+    env_file_resolved = Path(env_file).expanduser() if env_file else DEFAULT_ENV_FILE
+    loaded_envs = read_env_file(env_file_resolved)
+    for key, value in loaded_envs.items():
+        env_for_safety.setdefault(key, value)
+    live_execution_allowed = allow_openhands and env_for_safety.get("AGENT_MANAGER_ENABLE_OPENHANDS") == "1" and not dry_run
+
+    if live_execution_allowed:
+        worktree_meta = create_fresh_openhands_worktree(project_id, canonical_repo, created)
+        worktree = Path(str(worktree_meta["worktree_path"]))
+    else:
+        worktree = ensure_worktree_allowed(project_id, resolve_worktree_path(project_id, worktree_path), canonical_repo)
+        if not worktree.exists():
+            raise SystemExit(f"worktree path does not exist: {worktree}")
+        worktree_meta = {
+            "worktree_path": worktree,
+            "worktree_branch": worktree_branch(worktree),
+            "base_branch": "HEAD",
+            "worktree_head": git_output(["rev-parse", "HEAD"], worktree).strip(),
+            "worktree_created": False,
+            "reused_existing_worktree": (latest_coder_worktree_path(project_id) is not None) and (worktree_path is None),
+            "status": "dry_run",
+        }
+    worktree = ensure_worktree_allowed(project_id, worktree, canonical_repo)
+    branch = str(worktree_meta["worktree_branch"])
+    fresh_worktree_created = bool(worktree_meta["worktree_created"])
+    reused_existing_worktree = bool(worktree_meta["reused_existing_worktree"])
+
     if Path.cwd().resolve() == canonical_repo.expanduser().resolve():
         raise SystemExit("run_openhands_coder_task.py must not be launched from the canonical target repo")
 
@@ -596,8 +807,7 @@ def generate(
     )
     command = build_openhands_command(openhands_command, prompt_path)
 
-    before_status = git_output(["status", "--short"], worktree)
-    branch = worktree_branch(worktree)
+    before_status = git_output(["status", "--short", "--untracked-files=all"], worktree)
     stdout = ""
     stderr = ""
     timed_out = False
@@ -656,7 +866,7 @@ def generate(
         stderr = result.stderr or ""
         returncode = int(result.returncode)
 
-    after_status = git_output(["status", "--short"], worktree)
+    after_status = git_output(["status", "--short", "--untracked-files=all"], worktree)
     diff_summary = git_output(["diff", "--stat"], worktree)
     if not diff_summary.strip():
         diff_summary = "No unstaged diff reported.\n"
@@ -665,6 +875,15 @@ def generate(
     expected_smoke_file = worktree / SMOKE_EXPECTED_FILE
     expected_smoke_file_exists = expected_smoke_file.exists()
     misplaced_paths = misplaced_smoke_file_paths(worktree=worktree, run_dir=run_dir)
+
+    # Detect changed files including untracked files
+    changed_files_data = detect_changed_files(worktree) if execution_performed else {
+        "tracked_modified_files": [],
+        "staged_files": [],
+        "untracked_files": [],
+        "all_changed_files": [],
+        "worktree_changed": False,
+    }
 
     exit_status = {
         "schema_version": 1,
@@ -685,6 +904,8 @@ def generate(
         "canonical_repo": str(canonical_repo),
         "worktree_path": str(worktree),
         "worktree_git_branch": branch,
+        "fresh_worktree_created": fresh_worktree_created,
+        "reused_existing_worktree": reused_existing_worktree,
         "artifacts_read": artifact_summaries,
         "env_summary": env_summary,
         "command_argv_redacted": command,
@@ -695,6 +916,17 @@ def generate(
         "openhands_help_returncode": openhands_help_returncode,
         "command_refusal_reason": command_refusal_reason,
     }
+
+    # Compute scope status
+    scope_status_data = compute_scope_status(
+        smoke_task=smoke_task,
+        objective=objective,
+        changed_files=changed_files_data.get("all_changed_files", []),
+        canonical_repo_clean=canonical_repo_clean,
+    )
+    scope_status_data["project_id"] = project_id
+    scope_status_data["created_utc"] = created
+
     summary = {
         "schema_version": 1,
         "project_id": project_id,
@@ -705,6 +937,8 @@ def generate(
         "objective_id": objective.get("id"),
         "worktree_path": str(worktree),
         "worktree_git_branch": branch,
+        "fresh_worktree_created": fresh_worktree_created,
+        "reused_existing_worktree": reused_existing_worktree,
         "openhands_execution_performed": execution_performed,
         "dry_run": safety["dry_run"],
         "prompt_source": prompt_source,
@@ -713,6 +947,7 @@ def generate(
         "no_commit_push_merge_or_pr_performed": True,
         "command_refusal_reason": command_refusal_reason,
     }
+
     smoke_status: dict[str, Any] | None = None
     if smoke_task:
         smoke_passed = (
@@ -722,6 +957,7 @@ def generate(
             and expected_smoke_file_exists
             and canonical_repo_clean
             and not misplaced_paths
+            and scope_status_data.get("scope_status") == "pass"
         )
         smoke_status = {
             "schema_version": 1,
@@ -738,11 +974,48 @@ def generate(
             "returncode": returncode,
             "timed_out": timed_out,
             "openhands_execution_performed": execution_performed,
-            "status": "pass" if smoke_passed else ("fail" if not canonical_repo_clean else "warn"),
+            "scope_status": scope_status_data.get("scope_status", "warn"),
+            "status": "pass" if smoke_passed else ("fail" if not canonical_repo_clean or scope_status_data.get("scope_status") == "fail" else "warn"),
         }
         summary["smoke_status"] = smoke_status["status"]
-        if smoke_status["status"] != "pass":
-            summary["status"] = smoke_status["status"]
+
+    # Update summary status based on all factors
+    final_status = exit_status["status"]
+    if smoke_task:
+        if scope_status_data.get("scope_status") == "fail":
+            final_status = "fail"
+        elif not canonical_repo_clean:
+            final_status = "fail"
+        elif smoke_status and smoke_status["status"] in {"warn", "fail"}:
+            final_status = smoke_status["status"]
+    else:
+        if scope_status_data.get("scope_status") == "fail":
+            final_status = "fail"
+        elif not canonical_repo_clean:
+            final_status = "fail"
+        elif final_status == "pass" and scope_status_data.get("scope_status") == "warn":
+            final_status = "warn"
+
+    summary["status"] = final_status
+
+    # Write new artifacts
+    worktree_info = {
+        "schema_version": 1,
+        "project_id": project_id,
+        "created_utc": created,
+        "canonical_repo": str(canonical_repo),
+        "worktree_path": str(worktree),
+        "worktree_branch": branch,
+        "worktree_created": fresh_worktree_created,
+        "reused_existing_worktree": reused_existing_worktree,
+        "worktree_head": str(worktree_meta["worktree_head"]),
+        "base_branch": str(worktree_meta["base_branch"]),
+        "status": "active" if execution_performed else str(worktree_meta["status"]),
+    }
+
+    (run_dir / "OPENHANDS_WORKTREE_INFO.json").write_text(json.dumps(worktree_info, indent=2, sort_keys=True) + "\n")
+    (run_dir / "OPENHANDS_CHANGED_FILES.json").write_text(json.dumps(changed_files_data, indent=2, sort_keys=True) + "\n")
+    (run_dir / "OPENHANDS_SCOPE_STATUS.json").write_text(json.dumps(scope_status_data, indent=2, sort_keys=True) + "\n")
 
     (run_dir / "OPENHANDS_COMMAND.txt").write_text(shlex.join(command) + "\n")
     (run_dir / "OPENHANDS_STDOUT.txt").write_text(stdout)

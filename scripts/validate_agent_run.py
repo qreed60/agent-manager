@@ -524,7 +524,7 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
 
 
 def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path) -> None:
-    """Validate Phase 18B controlled OpenHands coder artifacts."""
+    """Validate Phase 18B/E controlled OpenHands coder artifacts."""
     required_json = [
         ("openhands_coder_run_parse", "OPENHANDS_CODER_RUN.json"),
         ("openhands_exit_status_parse", "OPENHANDS_EXIT_STATUS.json"),
@@ -548,6 +548,20 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
         data = validate_json_artifact(recorder, check_id, coder_dir / filename)
         if data is not None:
             parsed[filename] = data
+    
+    # Validate new Phase 18E artifacts
+    worktree_info = validate_json_artifact(recorder, "openhands_worktree_info_parse", coder_dir / "OPENHANDS_WORKTREE_INFO.json")
+    if worktree_info is not None:
+        parsed["OPENHANDS_WORKTREE_INFO.json"] = worktree_info
+    
+    changed_files = validate_json_artifact(recorder, "openhands_changed_files_parse", coder_dir / "OPENHANDS_CHANGED_FILES.json")
+    if changed_files is not None:
+        parsed["OPENHANDS_CHANGED_FILES.json"] = changed_files
+    
+    scope_status = validate_json_artifact(recorder, "openhands_scope_status_parse", coder_dir / "OPENHANDS_SCOPE_STATUS.json")
+    if scope_status is not None:
+        parsed["OPENHANDS_SCOPE_STATUS.json"] = scope_status
+
     smoke_path = coder_dir / "OPENHANDS_SMOKE_STATUS.json"
     if smoke_path.exists():
         data = validate_json_artifact(recorder, "openhands_smoke_status_parse", smoke_path)
@@ -627,10 +641,10 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
     summary = parsed.get("OPENHANDS_CODER_SUMMARY.json")
     if isinstance(summary, dict):
         gen_by = summary.get("generated_by")
-        if gen_by == "phase18b_controlled_openhands_coder_execution":
-            recorder.pass_check("openhands_summary_generated_by", "OPENHANDS_CODER_SUMMARY.json generated_by is phase18b", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
+        if gen_by == "phase18e_fresh_worktree_and_scope_guard":
+            recorder.pass_check("openhands_summary_generated_by", "OPENHANDS_CODER_SUMMARY.json generated_by is phase18e", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
         else:
-            recorder.fail_check("openhands_summary_generated_by", f"OPENHANDS_CODER_SUMMARY.json generated_by must be phase18b_controlled_openhands_coder_execution; found {gen_by!r}", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
+            recorder.fail_check("openhands_summary_generated_by", f"OPENHANDS_CODER_SUMMARY.json generated_by must be phase18e_fresh_worktree_and_scope_guard; found {gen_by!r}", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
 
     smoke = parsed.get("OPENHANDS_SMOKE_STATUS.json")
     if isinstance(smoke, dict):
@@ -703,6 +717,102 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
             )
         elif isinstance(misplaced, list):
             recorder.pass_check("openhands_smoke_no_misplaced_file_paths", "Smoke task reported no misplaced smoke files", path=coder_dir / "OPENHANDS_SMOKE_STATUS.json")
+
+    # Validate OPENHANDS_WORKTREE_INFO.json fields
+    wt_info = parsed.get("OPENHANDS_WORKTREE_INFO.json")
+    if isinstance(wt_info, dict):
+        wt_required = {"schema_version", "project_id", "created_utc", "canonical_repo", "worktree_path", "worktree_branch", "worktree_created", "reused_existing_worktree", "worktree_head", "base_branch", "status"}
+        wt_missing = sorted(wt_required - set(wt_info))
+        if not wt_missing:
+            recorder.pass_check("openhands_worktree_info_fields", "OPENHANDS_WORKTREE_INFO.json has required fields", path=coder_dir / "OPENHANDS_WORKTREE_INFO.json")
+        else:
+            recorder.fail_check(
+                "openhands_worktree_info_fields",
+                "OPENHANDS_WORKTREE_INFO.json is missing required fields",
+                path=coder_dir / "OPENHANDS_WORKTREE_INFO.json",
+                details={"missing": wt_missing},
+            )
+
+    # Validate OPENHANDS_CHANGED_FILES.json fields
+    cf = parsed.get("OPENHANDS_CHANGED_FILES.json")
+    if isinstance(cf, dict):
+        cf_required = {"tracked_modified_files", "staged_files", "untracked_files", "all_changed_files", "worktree_changed"}
+        cf_missing = sorted(cf_required - set(cf))
+        if not cf_missing:
+            recorder.pass_check("openhands_changed_files_fields", "OPENHANDS_CHANGED_FILES.json has required fields", path=coder_dir / "OPENHANDS_CHANGED_FILES.json")
+        else:
+            recorder.fail_check(
+                "openhands_changed_files_fields",
+                "OPENHANDS_CHANGED_FILES.json is missing required fields",
+                path=coder_dir / "OPENHANDS_CHANGED_FILES.json",
+                details={"missing": cf_missing},
+            )
+
+    # Validate OPENHANDS_SCOPE_STATUS.json and apply scope guard logic
+    ss = parsed.get("OPENHANDS_SCOPE_STATUS.json")
+    if isinstance(ss, dict):
+        ss_required = {"schema_version", "project_id", "created_utc", "task_type", "allowed_files", "changed_files", "scope_status", "details"}
+        ss_missing = sorted(ss_required - set(ss))
+        if not ss_missing:
+            recorder.pass_check("openhands_scope_status_fields", "OPENHANDS_SCOPE_STATUS.json has required fields", path=coder_dir / "OPENHANDS_SCOPE_STATUS.json")
+        else:
+            recorder.fail_check(
+                "openhands_scope_status_fields",
+                "OPENHANDS_SCOPE_STATUS.json is missing required fields",
+                path=coder_dir / "OPENHANDS_SCOPE_STATUS.json",
+                details={"missing": ss_missing},
+            )
+        scope_val = ss.get("scope_status")
+        if scope_val == "fail":
+            recorder.fail_check(
+                "openhands_scope_guard_fail",
+                f"Scope guard status is fail: {ss.get('details', 'unknown')}",
+                path=coder_dir / "OPENHANDS_SCOPE_STATUS.json",
+            )
+        elif scope_val == "warn":
+            recorder.pass_check(
+                "openhands_scope_guard_warn",
+                f"Scope guard status is warn (non-blocking): {ss.get('details', 'unknown')}",
+                path=coder_dir / "OPENHANDS_SCOPE_STATUS.json",
+            )
+        else:
+            recorder.pass_check("openhands_scope_guard_pass", f"Scope guard status is pass", path=coder_dir / "OPENHANDS_SCOPE_STATUS.json")
+
+    # Smoke warn acceptance rule
+    if smoke and isinstance(smoke, dict):
+        if smoke.get("status") == "warn":
+            # Accept smoke warn only if canonical repo clean and scope status not fail
+            smoke_canonical_clean = smoke.get("canonical_repo_clean") is True
+            scope_not_fail = (ss is None) or ss.get("scope_status") != "fail"
+            if smoke_canonical_clean and scope_not_fail:
+                recorder.pass_check(
+                    "smoke_warn_accepted",
+                    "Smoke warn accepted: canonical repo clean and scope status not fail",
+                    path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
+                )
+            else:
+                recorder.fail_check(
+                    "smoke_warn_rejected",
+                    "Smoke warn rejected: canonical repo dirty or scope status is fail",
+                    path=coder_dir / "OPENHANDS_SMOKE_STATUS.json",
+                )
+
+    # Fresh worktree requirement for executed live runs
+    run_rec = parsed.get("OPENHANDS_CODER_RUN.json")
+    if isinstance(run_rec, dict) and run_rec.get("execution_performed") is True:
+        fresh = run_rec.get("fresh_worktree_created")
+        if fresh is True:
+            recorder.pass_check(
+                "fresh_worktree_required",
+                "Executed live OpenHands run created a fresh worktree",
+                path=coder_dir / "OPENHANDS_CODER_RUN.json",
+            )
+        else:
+            recorder.fail_check(
+                "fresh_worktree_required",
+                "Executed live OpenHands run must have fresh_worktree_created=true; add --reuse-worktree flag to override in future",
+                path=coder_dir / "OPENHANDS_CODER_RUN.json",
+            )
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:
