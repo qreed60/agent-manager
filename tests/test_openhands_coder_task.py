@@ -99,7 +99,9 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         smoke_task: bool = False,
         write_smoke_file: bool = False,
         write_misplaced_smoke_file: bool = False,
+        write_files: list[str] | None = None,
         timeout_on_run: bool = False,
+        allowed_files: list[str] | None = None,
     ) -> tuple[tempfile.TemporaryDirectory[str], Path, str, dict, MagicMock]:
         tmp, root, project_id, _repo, worktree = self.make_sample_root()
         old_root = run_openhands_coder_task.ROOT
@@ -119,6 +121,10 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
                 smoke_file = prompt_path.parent / run_openhands_coder_task.SMOKE_EXPECTED_FILE
                 smoke_file.parent.mkdir(parents=True, exist_ok=True)
                 smoke_file.write_text("OpenHands smoke task completed.\n")
+            for relative_path in write_files or []:
+                target = Path(str(kwargs["cwd"])) / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("OpenHands manual write completed.\n")
             return subprocess.CompletedProcess(command, 0, "ok", "")
 
         runner = MagicMock(side_effect=fake_runner)
@@ -134,6 +140,7 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
                     task_text=task_text,
                     task_file=task_file,
                     smoke_task=smoke_task,
+                    allowed_files=allowed_files,
                     command_runner=runner,
                 )
         finally:
@@ -214,6 +221,21 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
         finally:
             run_openhands_coder_task.ROOT = old_root
             tmp.cleanup()
+
+    def test_allowed_file_repeatable_parsing(self) -> None:
+        parser = run_openhands_coder_task.build_arg_parser()
+        args = parser.parse_args(
+            [
+                "sample_project",
+                "--task-text",
+                "Do work",
+                "--allowed-file",
+                "one.txt",
+                "--allowed-file",
+                "two.txt",
+            ]
+        )
+        self.assertEqual(args.allowed_file, ["one.txt", "two.txt"])
 
     def test_simultaneous_override_options_are_rejected(self) -> None:
         tmp, root, project_id, _repo, worktree = self.make_sample_root()
@@ -591,6 +613,124 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
             finally:
                 validate_agent_run.ROOT = old_root
             self.assertEqual(recorder.failures(), [], json.dumps(recorder.failures(), indent=2))
+
+    def test_live_manual_task_text_requires_allowed_file(self) -> None:
+        tmp, root, project_id, _repo, worktree = self.make_sample_root()
+        old_root = run_openhands_coder_task.ROOT
+        run_openhands_coder_task.ROOT = root
+        try:
+            with patch.dict(os.environ, {"AGENT_MANAGER_ENABLE_OPENHANDS": "1"}, clear=False):
+                with self.assertRaises(ValueError):
+                    run_openhands_coder_task.generate(
+                        project_id,
+                        created_utc="20260605T120000Z",
+                        allow_openhands=True,
+                        worktree_path=str(worktree),
+                        task_text="Write a manual file.",
+                    )
+        finally:
+            run_openhands_coder_task.ROOT = old_root
+            tmp.cleanup()
+
+    def test_live_manual_task_file_requires_allowed_file(self) -> None:
+        tmp, root, project_id, _repo, worktree = self.make_sample_root()
+        task_file = root / "manual_task.md"
+        task_file.write_text("Write a manual file.\n")
+        old_root = run_openhands_coder_task.ROOT
+        run_openhands_coder_task.ROOT = root
+        try:
+            with patch.dict(os.environ, {"AGENT_MANAGER_ENABLE_OPENHANDS": "1"}, clear=False):
+                with self.assertRaises(ValueError):
+                    run_openhands_coder_task.generate(
+                        project_id,
+                        created_utc="20260605T120000Z",
+                        allow_openhands=True,
+                        worktree_path=str(worktree),
+                        task_file=str(task_file),
+                    )
+        finally:
+            run_openhands_coder_task.ROOT = old_root
+            tmp.cleanup()
+
+    def test_manual_scope_passes_when_only_allowed_file_changes(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, _root, _project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            scope = json.loads((run_dir / "OPENHANDS_SCOPE_STATUS.json").read_text())
+            changed = json.loads((run_dir / "OPENHANDS_CHANGED_FILES.json").read_text())
+            summary_json = json.loads((run_dir / "OPENHANDS_CODER_SUMMARY.json").read_text())
+            self.assertEqual(scope["scope_status"], "pass")
+            self.assertEqual(scope["allowed_files"], [allowed])
+            self.assertIn(allowed, changed["untracked_files"])
+            self.assertEqual(summary_json["status"], "pass")
+            self.assertEqual(summary_json["task_type"], "manual_task_text")
+
+    def test_manual_scope_fails_when_extra_untracked_file_changes(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, _root, _project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed, "extra.txt"],
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            scope = json.loads((run_dir / "OPENHANDS_SCOPE_STATUS.json").read_text())
+            summary_json = json.loads((run_dir / "OPENHANDS_CODER_SUMMARY.json").read_text())
+            self.assertEqual(scope["scope_status"], "fail")
+            self.assertIn("extra.txt", scope["details"])
+            self.assertEqual(summary_json["status"], "fail")
+
+    def test_manual_live_no_file_change_produces_warn_summary(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, _root, _project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            scope = json.loads((run_dir / "OPENHANDS_SCOPE_STATUS.json").read_text())
+            summary_json = json.loads((run_dir / "OPENHANDS_CODER_SUMMARY.json").read_text())
+            self.assertEqual(scope["scope_status"], "warn")
+            self.assertEqual(summary_json["status"], "warn")
+
+    def test_validation_fails_for_live_manual_task_with_no_allowed_files(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            run_dir = Path(summary["run_dir"])
+            run_path = run_dir / "OPENHANDS_CODER_RUN.json"
+            run_record = json.loads(run_path.read_text())
+            run_record["manual_allowed_files"] = []
+            run_path.write_text(json.dumps(run_record) + "\n")
+            old_root = validate_agent_run.ROOT
+            validate_agent_run.ROOT = root
+            try:
+                recorder = validate_agent_run.CheckRecorder()
+                validate_agent_run.validate_openhands_coder_artifacts(
+                    recorder,
+                    (root / "runs" / project_id / "latest_openhands_coder").resolve(),
+                )
+            finally:
+                validate_agent_run.ROOT = old_root
+            failed_ids = {check["id"] for check in recorder.failures()}
+            self.assertIn("manual_task_allowed_files_present", failed_ids)
 
     def test_default_dry_run_behavior_unchanged(self) -> None:
         """Default dry-run must not create a fresh worktree."""

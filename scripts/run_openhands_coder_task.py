@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATED_BY = "phase18e_fresh_worktree_and_scope_guard"
+GENERATED_BY = "phase18f_manual_nonsmoke_write_gate"
 DEFAULT_ENV_FILE = Path.home() / ".config" / "agent-manager" / "env.local"
 OPENHANDS_ENV_NAMES = [
     "LLM_BASE_URL",
@@ -361,27 +361,62 @@ def detect_changed_files(worktree: Path) -> dict[str, Any]:
     }
 
 
+def normalize_allowed_files(paths: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for raw in paths or []:
+        path = str(raw).strip()
+        if not path:
+            continue
+        normalized.append(path[2:] if path.startswith("./") else path)
+    return sorted(set(normalized))
+
+
+def task_type_for_prompt(*, task_text: str | None, task_file: str | None, smoke_task: bool) -> str:
+    if smoke_task:
+        return "smoke"
+    if task_text is not None:
+        return "manual_task_text"
+    if task_file is not None:
+        return "manual_task_file"
+    return "generated"
+
+
+def validate_allowed_file_usage(*, smoke_task: bool, task_type: str, manual_allowed_files: list[str], live_execution_allowed: bool) -> None:
+    if smoke_task and manual_allowed_files and manual_allowed_files != SMOKE_ALLOWED_FILES:
+        raise ValueError("--allowed-file may only be used with --smoke-task when it exactly matches the smoke file")
+    if live_execution_allowed and task_type in {"manual_task_text", "manual_task_file"} and not manual_allowed_files:
+        raise ValueError("live non-smoke task overrides require at least one --allowed-file")
+
+
 def compute_scope_status(
     *,
     smoke_task: bool,
     objective: dict[str, Any],
     changed_files: list[str],
     canonical_repo_clean: bool,
+    manual_allowed_files: list[str] | None = None,
+    manual_write_task: bool = False,
 ) -> dict[str, Any]:
     """Compute scope guard status for the OpenHands run."""
+    manual_allowed = normalize_allowed_files(manual_allowed_files)
     if smoke_task:
-        allowed = SMOKE_ALLOWED_FILES
+        allowed = manual_allowed or SMOKE_ALLOWED_FILES
         task_type = "smoke"
+    elif manual_allowed:
+        allowed = manual_allowed
+        task_type = "manual"
     else:
         allowed_raw = objective.get("allowed_files")
         if isinstance(allowed_raw, list) and len(allowed_raw) > 0:
-            allowed = [str(f) for f in allowed_raw]
+            allowed = normalize_allowed_files([str(f) for f in allowed_raw])
             task_type = "non-smoke"
         else:
             if not changed_files:
-                status = "warn" if objective.get("write_capable") is True else "pass"
+                status = "warn" if manual_write_task or objective.get("write_capable") is True else "pass"
                 details = (
-                    "no allowed_files available for non-smoke write-capable task; scope cannot be verified"
+                    "manual live write task changed no files"
+                    if manual_write_task
+                    else "no allowed_files available for non-smoke write-capable task; scope cannot be verified"
                     if status == "warn"
                     else "no changed files detected"
                 )
@@ -389,7 +424,7 @@ def compute_scope_status(
                     "schema_version": 1,
                     "project_id": "",
                     "created_utc": "",
-                    "task_type": "non-smoke",
+                    "task_type": "manual" if manual_write_task else "non-smoke",
                     "allowed_files": [],
                     "changed_files": [],
                     "scope_status": status,
@@ -399,7 +434,7 @@ def compute_scope_status(
                 "schema_version": 1,
                 "project_id": "",
                 "created_utc": "",
-                "task_type": "non-smoke",
+                "task_type": "manual" if manual_write_task else "non-smoke",
                 "allowed_files": [],
                 "changed_files": changed_files,
                 "scope_status": "warn",
@@ -407,6 +442,14 @@ def compute_scope_status(
             }
 
     if not changed_files:
+        no_change_status = "warn" if manual_write_task else ("fail" if not canonical_repo_clean else "pass")
+        no_change_details = (
+            "manual live write task changed no files"
+            if manual_write_task
+            else "canonical repo is dirty"
+            if not canonical_repo_clean
+            else "no changed files detected"
+        )
         return {
             "schema_version": 1,
             "project_id": "",
@@ -414,8 +457,8 @@ def compute_scope_status(
             "task_type": task_type,
             "allowed_files": allowed,
             "changed_files": [],
-            "scope_status": "fail" if not canonical_repo_clean else "pass",
-            "details": "canonical repo is dirty" if not canonical_repo_clean else "no changed files detected",
+            "scope_status": no_change_status,
+            "details": no_change_details,
         }
 
     violations = []
@@ -737,6 +780,7 @@ def generate(
     task_text: str | None = None,
     task_file: str | None = None,
     smoke_task: bool = False,
+    allowed_files: list[str] | None = None,
     command_runner: CommandRunner = subprocess.run,
 ) -> dict[str, Any]:
     created = created_utc or utc_now()
@@ -749,6 +793,15 @@ def generate(
     for key, value in loaded_envs.items():
         env_for_safety.setdefault(key, value)
     live_execution_allowed = allow_openhands and env_for_safety.get("AGENT_MANAGER_ENABLE_OPENHANDS") == "1" and not dry_run
+    task_type = task_type_for_prompt(task_text=task_text, task_file=task_file, smoke_task=smoke_task)
+    task_override_used = task_type in {"smoke", "manual_task_text", "manual_task_file"}
+    manual_allowed_files = normalize_allowed_files(allowed_files)
+    validate_allowed_file_usage(
+        smoke_task=smoke_task,
+        task_type=task_type,
+        manual_allowed_files=manual_allowed_files,
+        live_execution_allowed=live_execution_allowed,
+    )
 
     if live_execution_allowed:
         worktree_meta = create_fresh_openhands_worktree(project_id, canonical_repo, created)
@@ -910,6 +963,9 @@ def generate(
         "env_summary": env_summary,
         "command_argv_redacted": command,
         "prompt_source": prompt_source,
+        "manual_allowed_files": manual_allowed_files,
+        "task_override_used": task_override_used,
+        "task_type": task_type,
         "execution_performed": execution_performed,
         "required_artifacts": REQUIRED_ARTIFACTS,
         "openhands_supported_flags": openhands_supported_flags,
@@ -923,6 +979,8 @@ def generate(
         objective=objective,
         changed_files=changed_files_data.get("all_changed_files", []),
         canonical_repo_clean=canonical_repo_clean,
+        manual_allowed_files=manual_allowed_files if task_type in {"manual_task_text", "manual_task_file"} else None,
+        manual_write_task=execution_performed and task_type in {"manual_task_text", "manual_task_file"},
     )
     scope_status_data["project_id"] = project_id
     scope_status_data["created_utc"] = created
@@ -942,6 +1000,9 @@ def generate(
         "openhands_execution_performed": execution_performed,
         "dry_run": safety["dry_run"],
         "prompt_source": prompt_source,
+        "manual_allowed_files": manual_allowed_files,
+        "task_override_used": task_override_used,
+        "task_type": task_type,
         "returncode": returncode,
         "worktree_changed": before_status != after_status or bool(after_status.strip()),
         "no_commit_push_merge_or_pr_performed": True,
@@ -1059,7 +1120,7 @@ Worktree changes are left unstaged for human review. No commit, push, merge, or 
     return summary
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate or run a controlled OpenHands coder task.")
     parser.add_argument("project_id")
     parser.add_argument("--allow-openhands", action="store_true")
@@ -1073,6 +1134,12 @@ def main() -> None:
     parser.add_argument("--task-text", default=None)
     parser.add_argument("--task-file", default=None)
     parser.add_argument("--smoke-task", action="store_true", default=False)
+    parser.add_argument("--allowed-file", action="append", default=[])
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
     if prompt_override_count(args.task_text, args.task_file, args.smoke_task) > 1:
         parser.error("--task-text, --task-file, and --smoke-task are mutually exclusive")
@@ -1090,6 +1157,7 @@ def main() -> None:
         task_text=args.task_text,
         task_file=args.task_file,
         smoke_task=args.smoke_task,
+        allowed_files=args.allowed_file,
     )
     print(f"OpenHands coder scaffold status: {summary['status']}")
     print(f"Run dir: {summary['run_dir']}")

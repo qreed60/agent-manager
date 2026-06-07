@@ -629,6 +629,11 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
             recorder.pass_check("openhands_command_override_envs", "OpenHands command includes --override-with-envs", path=coder_dir / "OPENHANDS_CODER_RUN.json")
         else:
             recorder.fail_check("openhands_command_override_envs", "OpenHands command must include --override-with-envs", path=coder_dir / "OPENHANDS_CODER_RUN.json")
+        manual_allowed = run_record.get("manual_allowed_files")
+        if isinstance(manual_allowed, list):
+            recorder.pass_check("openhands_run_manual_allowed_files_parse", "OPENHANDS_CODER_RUN.json manual_allowed_files is a list", path=coder_dir / "OPENHANDS_CODER_RUN.json")
+        elif "manual_allowed_files" in run_record:
+            recorder.fail_check("openhands_run_manual_allowed_files_parse", "OPENHANDS_CODER_RUN.json manual_allowed_files must be a list", path=coder_dir / "OPENHANDS_CODER_RUN.json")
 
     exit_status = parsed.get("OPENHANDS_EXIT_STATUS.json")
     if isinstance(exit_status, dict):
@@ -641,10 +646,10 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
     summary = parsed.get("OPENHANDS_CODER_SUMMARY.json")
     if isinstance(summary, dict):
         gen_by = summary.get("generated_by")
-        if gen_by == "phase18e_fresh_worktree_and_scope_guard":
-            recorder.pass_check("openhands_summary_generated_by", "OPENHANDS_CODER_SUMMARY.json generated_by is phase18e", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
+        if gen_by == "phase18f_manual_nonsmoke_write_gate":
+            recorder.pass_check("openhands_summary_generated_by", "OPENHANDS_CODER_SUMMARY.json generated_by is phase18f", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
         else:
-            recorder.fail_check("openhands_summary_generated_by", f"OPENHANDS_CODER_SUMMARY.json generated_by must be phase18e_fresh_worktree_and_scope_guard; found {gen_by!r}", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
+            recorder.fail_check("openhands_summary_generated_by", f"OPENHANDS_CODER_SUMMARY.json generated_by must be phase18f_manual_nonsmoke_write_gate; found {gen_by!r}", path=coder_dir / "OPENHANDS_CODER_SUMMARY.json")
 
     smoke = parsed.get("OPENHANDS_SMOKE_STATUS.json")
     if isinstance(smoke, dict):
@@ -813,6 +818,28 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
                 "Executed live OpenHands run must have fresh_worktree_created=true; add --reuse-worktree flag to override in future",
                 path=coder_dir / "OPENHANDS_CODER_RUN.json",
             )
+        task_type = run_rec.get("task_type")
+        manual_allowed = run_rec.get("manual_allowed_files")
+        if task_type in {"manual_task_text", "manual_task_file"}:
+            if isinstance(manual_allowed, list) and manual_allowed:
+                recorder.pass_check(
+                    "manual_task_allowed_files_present",
+                    "Live manual OpenHands task has explicit allowed files",
+                    path=coder_dir / "OPENHANDS_CODER_RUN.json",
+                )
+            else:
+                recorder.fail_check(
+                    "manual_task_allowed_files_present",
+                    "Live non-smoke manual OpenHands task must include manual_allowed_files",
+                    path=coder_dir / "OPENHANDS_CODER_RUN.json",
+                )
+            cf = parsed.get("OPENHANDS_CHANGED_FILES.json")
+            if isinstance(cf, dict) and cf.get("worktree_changed") is False:
+                recorder.pass_check(
+                    "manual_task_no_file_change_warn",
+                    "Live manual OpenHands task changed no files; review as warning",
+                    path=coder_dir / "OPENHANDS_CHANGED_FILES.json",
+                )
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:
