@@ -12,6 +12,19 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCHESTRATOR_ARTIFACT_POINTERS = ("latest_langgraph_v0", "latest_nightly_window")
+OPENHANDS_MANUAL_GATE_FAILURE_CLASSIFICATIONS = {
+    "none",
+    "exited_0_no_changes",
+    "misplaced_run_dir_write",
+    "scope_fail",
+    "apply_check_fail",
+    "decision_not_accepted",
+    "coder_failed",
+    "canonical_repo_dirty",
+    "applied_unexpectedly",
+    "missing_required_artifact",
+    "unknown",
+}
 
 
 class CheckRecorder:
@@ -618,6 +631,48 @@ def validate_openhands_manual_gate_summary(recorder: CheckRecorder, coder_dir: P
     status = data.get("status")
     dry_run = data.get("dry_run")
     openhands_executed = data.get("openhands_execution_performed")
+    failure_classification = data.get("failure_classification")
+    retryable = data.get("retryable")
+    misplaced_paths = data.get("misplaced_run_dir_paths")
+
+    if failure_classification in OPENHANDS_MANUAL_GATE_FAILURE_CLASSIFICATIONS:
+        recorder.pass_check(
+            "openhands_manual_gate_failure_classification",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json failure_classification is {failure_classification}",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_failure_classification",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json failure_classification must be one of {sorted(OPENHANDS_MANUAL_GATE_FAILURE_CLASSIFICATIONS)}; found {failure_classification!r}",
+            path=gate_path,
+        )
+
+    if isinstance(retryable, bool):
+        recorder.pass_check(
+            "openhands_manual_gate_retryable_bool",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json retryable is boolean",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_retryable_bool",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json retryable must be boolean; found {retryable!r}",
+            path=gate_path,
+        )
+
+    if isinstance(misplaced_paths, list):
+        recorder.pass_check(
+            "openhands_manual_gate_misplaced_paths_list",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json misplaced_run_dir_paths is a list",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_misplaced_paths_list",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json misplaced_run_dir_paths must be a list; found {misplaced_paths!r}",
+            path=gate_path,
+        )
 
     if dry_run is True and openhands_executed is not True:
         # Dry-run warn is acceptable.
@@ -641,10 +696,34 @@ def validate_openhands_manual_gate_summary(recorder: CheckRecorder, coder_dir: P
                 f"OPENHANDS_MANUAL_GATE_SUMMARY.json live pass accepted (dry_run={dry_run}, openhands_execution_performed={openhands_executed})",
                 path=gate_path,
             )
+            if failure_classification == "none":
+                recorder.pass_check(
+                    "openhands_manual_gate_live_pass_classification_none",
+                    "OPENHANDS_MANUAL_GATE_SUMMARY.json live pass classification is none",
+                    path=gate_path,
+                )
+            else:
+                recorder.fail_check(
+                    "openhands_manual_gate_live_pass_classification_none",
+                    f"OPENHANDS_MANUAL_GATE_SUMMARY.json live pass classification must be none; found {failure_classification!r}",
+                    path=gate_path,
+                )
+            if retryable is False:
+                recorder.pass_check(
+                    "openhands_manual_gate_live_pass_not_retryable",
+                    "OPENHANDS_MANUAL_GATE_SUMMARY.json live pass retryable is false",
+                    path=gate_path,
+                )
+            else:
+                recorder.fail_check(
+                    "openhands_manual_gate_live_pass_not_retryable",
+                    f"OPENHANDS_MANUAL_GATE_SUMMARY.json live pass retryable must be false; found {retryable!r}",
+                    path=gate_path,
+                )
         else:
             recorder.fail_check(
                 "openhands_manual_gate_live_fail",
-                f"OPENHANDS_MANUAL_GATE_SUMMARY.json live run status must be pass; found {status!r}",
+                f"OPENHANDS_MANUAL_GATE_SUMMARY.json live run status must be pass; found {status!r}; failure_classification={failure_classification!r}",
                 path=gate_path,
             )
     else:
