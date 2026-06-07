@@ -131,6 +131,141 @@ class HumanApprovalPacketTests(unittest.TestCase):
             )
             self.assertEqual(recorder.failures(), [])
 
+    def phase20_summary(self, project_id: str, *, status: str = "pass") -> dict:
+        data = {
+            "schema_version": 1,
+            "generated_by": "phase20_first_overnight_write_capable_run",
+            "project_id": project_id,
+            "created_utc": "20260607T000000Z",
+            "run_dir": "/tmp/nightly",
+            "request_dir": "/tmp/request",
+            "request_sha256": "x",
+            "objective_id": "phase20_first_real_overnight_write_capable_run",
+            "risk_level": "low",
+            "allowed_files": ["docs/example.md"],
+            "expected_changed_files": ["docs/example.md"],
+            "max_write_tasks": 1,
+            "max_retries_per_task": 1,
+            "attempts": [
+                {
+                    "attempt_number": 1,
+                    "run_dir": "/tmp/attempt",
+                    "status": "pass",
+                    "failure_classification": "none",
+                    "retryable": False,
+                    "changed_files": ["docs/example.md"],
+                    "decision_recommendation": "accept_for_manual_review",
+                    "apply_check_passed": True,
+                    "applied": False,
+                    "canonical_repo_clean": True,
+                }
+            ],
+            "selected_attempt_run_dir": "/tmp/attempt",
+            "selected_attempt_status": "pass",
+            "changed_files": ["docs/example.md"],
+            "decision_recommendation": "accept_for_manual_review",
+            "apply_mode": "check_only",
+            "apply_check_passed": True,
+            "applied": False,
+            "canonical_repo_clean_before": True,
+            "canonical_repo_clean_after": True,
+            "blocked": False,
+            "blocked_reason": "",
+            "recommended_human_action": "Review artifacts.",
+            "status": status,
+            "no_apply_commit_push_merge_pr_or_cleanup_performed": True,
+        }
+        if status == "blocked":
+            data.update(
+                {
+                    "attempts": [
+                        {
+                            **data["attempts"][0],
+                            "status": "fail",
+                            "failure_classification": "apply_check_fail",
+                            "retryable": False,
+                            "apply_check_passed": False,
+                        }
+                    ],
+                    "selected_attempt_status": "fail",
+                    "apply_check_passed": False,
+                    "blocked": True,
+                    "blocked_reason": "apply_check_fail",
+                    "recommended_human_action": "Inspect the failed manual gate artifacts.",
+                }
+            )
+        return data
+
+    def write_phase20_summary(self, root: Path, project_id: str, data: dict) -> None:
+        path = root / "runs" / project_id / "latest_nightly_window" / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json"
+        path.write_text(json.dumps(data) + "\n")
+
+    def allow_gated_code_writing_in_packet(self, root: Path, project_id: str) -> None:
+        path = root / "runs" / project_id / "latest_human_approval" / "APPROVAL_PACKET.json"
+        packet = json.loads(path.read_text())
+        packet["safety_status"]["openhands_allowed"] = True
+        packet["safety_status"]["max_code_writing_tasks"] = 1
+        path.write_text(json.dumps(packet) + "\n")
+
+    def approval_safety_failures(self, root: Path, project_id: str) -> list[dict]:
+        recorder = validate_agent_run.CheckRecorder()
+        validate_agent_run.validate_human_approval_artifacts(
+            recorder,
+            (root / "runs" / project_id / "latest_human_approval").resolve(),
+        )
+        return [failure for failure in recorder.failures() if failure["id"] == "approval_packet_safety_flags"]
+
+    def test_normal_approval_packet_rejects_openhands_or_code_writing_without_phase20_summary(self) -> None:
+        tmp, root, project_id, _summary = self.generate_sample()
+        with tmp:
+            self.allow_gated_code_writing_in_packet(root, project_id)
+            self.assertEqual(len(self.approval_safety_failures(root, project_id)), 1)
+
+    def test_phase20_pass_summary_allows_gated_openhands_code_writing(self) -> None:
+        tmp, root, project_id, _summary = self.generate_sample()
+        with tmp:
+            self.allow_gated_code_writing_in_packet(root, project_id)
+            self.write_phase20_summary(root, project_id, self.phase20_summary(project_id, status="pass"))
+            self.assertEqual(self.approval_safety_failures(root, project_id), [])
+
+    def test_phase20_blocked_summary_allows_gated_openhands_code_writing_when_safe(self) -> None:
+        tmp, root, project_id, _summary = self.generate_sample()
+        with tmp:
+            self.allow_gated_code_writing_in_packet(root, project_id)
+            self.write_phase20_summary(root, project_id, self.phase20_summary(project_id, status="blocked"))
+            self.assertEqual(self.approval_safety_failures(root, project_id), [])
+
+    def test_phase20_summary_rejects_applied_true_for_gated_code_writing(self) -> None:
+        tmp, root, project_id, _summary = self.generate_sample()
+        with tmp:
+            self.allow_gated_code_writing_in_packet(root, project_id)
+            data = self.phase20_summary(project_id)
+            data["applied"] = True
+            self.write_phase20_summary(root, project_id, data)
+            self.assertEqual(len(self.approval_safety_failures(root, project_id)), 1)
+
+    def test_phase20_summary_rejects_dirty_canonical_repo_for_gated_code_writing(self) -> None:
+        tmp, root, project_id, _summary = self.generate_sample()
+        with tmp:
+            self.allow_gated_code_writing_in_packet(root, project_id)
+            data = self.phase20_summary(project_id)
+            data["canonical_repo_clean_after"] = False
+            self.write_phase20_summary(root, project_id, data)
+            self.assertEqual(len(self.approval_safety_failures(root, project_id)), 1)
+
+    def test_phase20_summary_rejects_too_many_write_tasks_or_attempts_for_gated_code_writing(self) -> None:
+        for mutation in ("write_tasks", "attempts"):
+            tmp, root, project_id, _summary = self.generate_sample()
+            with tmp, self.subTest(mutation=mutation):
+                self.allow_gated_code_writing_in_packet(root, project_id)
+                data = self.phase20_summary(project_id)
+                if mutation == "write_tasks":
+                    data["max_write_tasks"] = 2
+                else:
+                    data["attempts"] = data["attempts"] * 3
+                self.write_phase20_summary(root, project_id, data)
+                self.assertEqual(len(self.approval_safety_failures(root, project_id)), 1)
+
     def test_generic_non_thomson_project_path_works_for_helper_logic(self) -> None:
         tmp, root, project_id = self.make_sample_root()
         with tmp:

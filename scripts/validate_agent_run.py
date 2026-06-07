@@ -38,6 +38,7 @@ OPENHANDS_MANUAL_GATE_REQUEST_UNSAFE_COMMAND_PATTERNS = (
     "worktree remove",
     "branch -D",
 )
+OVERNIGHT_OPENHANDS_GENERATED_BY = "phase20_first_overnight_write_capable_run"
 
 
 class CheckRecorder:
@@ -529,7 +530,8 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
         human_approval_dir = validate_latest_dir(recorder, "latest_human_approval_dir", human_approval_pointer)
         if human_approval_dir is not None:
             resolved_dirs["latest_human_approval"] = str(human_approval_dir)
-            validate_human_approval_artifacts(recorder, human_approval_dir)
+            nightly_window_dir = Path(resolved_dirs["latest_nightly_window"]) if "latest_nightly_window" in resolved_dirs else None
+            validate_human_approval_artifacts(recorder, human_approval_dir, nightly_window_dir=nightly_window_dir)
     else:
         recorder.pass_check("latest_human_approval_optional", "latest_human_approval is absent; optional Phase 17 artifacts not validated", path=human_approval_pointer)
 
@@ -1609,7 +1611,164 @@ def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> Non
             )
 
 
-def validate_human_approval_artifacts(recorder: CheckRecorder, approval_dir: Path) -> None:
+def phase20_overnight_summary_allows_gated_code_writing(data: Any) -> tuple[bool, list[str]]:
+    failures: list[str] = []
+    if not isinstance(data, dict):
+        return False, ["summary is not an object"]
+    if data.get("generated_by") != OVERNIGHT_OPENHANDS_GENERATED_BY:
+        failures.append("generated_by is not Phase 20")
+    if data.get("max_write_tasks") != 1:
+        failures.append("max_write_tasks is not 1")
+    if data.get("max_retries_per_task") != 1:
+        failures.append("max_retries_per_task is not 1")
+
+    attempts = data.get("attempts")
+    if not isinstance(attempts, list):
+        failures.append("attempts is not a list")
+        attempts = []
+    elif len(attempts) > 2:
+        failures.append("attempts has more than 2 entries")
+
+    if data.get("applied") is not False:
+        failures.append("summary applied is not false")
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict):
+            failures.append(f"attempt {index} is not an object")
+            continue
+        if attempt.get("applied") is not False:
+            failures.append(f"attempt {index} applied is not false")
+
+    if data.get("apply_mode") != "check_only":
+        failures.append("apply_mode is not check_only")
+    if data.get("canonical_repo_clean_after") is not True:
+        failures.append("canonical_repo_clean_after is not true")
+    if data.get("no_apply_commit_push_merge_pr_or_cleanup_performed") is not True:
+        failures.append("no apply/commit/push/merge/PR/cleanup invariant is not true")
+
+    allowed_files = data.get("allowed_files")
+    changed_files = data.get("changed_files")
+    if not isinstance(allowed_files, list) or not all(isinstance(path, str) for path in allowed_files):
+        failures.append("allowed_files is not a string list")
+        allowed = set()
+    else:
+        allowed = set(allowed_files)
+    if not isinstance(changed_files, list) or not all(isinstance(path, str) for path in changed_files):
+        failures.append("changed_files is not a string list")
+        changed: list[str] = []
+    else:
+        changed = changed_files
+    outside_allowed = sorted(path for path in changed if path not in allowed)
+    if outside_allowed:
+        failures.append(f"changed_files outside allowed_files: {outside_allowed}")
+    for index, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict):
+            continue
+        attempt_changed = attempt.get("changed_files", [])
+        if not isinstance(attempt_changed, list) or not all(isinstance(path, str) for path in attempt_changed):
+            failures.append(f"attempt {index} changed_files is not a string list")
+            continue
+        attempt_outside_allowed = sorted(path for path in attempt_changed if path not in allowed)
+        if attempt_outside_allowed:
+            failures.append(f"attempt {index} changed_files outside allowed_files: {attempt_outside_allowed}")
+
+    status = data.get("status")
+    if status == "pass":
+        if data.get("decision_recommendation") != "accept_for_manual_review":
+            failures.append("pass summary decision_recommendation is not accept_for_manual_review")
+        if data.get("apply_check_passed") is not True:
+            failures.append("pass summary apply_check_passed is not true")
+    elif status == "blocked":
+        if data.get("blocked") is not True:
+            failures.append("blocked summary blocked is not true")
+        action = data.get("recommended_human_action")
+        if not isinstance(action, str) or not action.strip():
+            failures.append("blocked summary recommended_human_action is empty")
+    else:
+        failures.append("status is not pass or blocked")
+
+    return not failures, failures
+
+
+def phase20_overnight_summary_paths_for_approval(approval_dir: Path, nightly_window_dir: Path | None) -> list[Path]:
+    paths: list[Path] = []
+    if nightly_window_dir is not None:
+        paths.append(nightly_window_dir / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json")
+    run_root = approval_dir.parent
+    latest_nightly = run_root / "latest_nightly_window"
+    if latest_nightly.exists() or latest_nightly.is_symlink():
+        paths.append(latest_nightly / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json")
+    paths.extend(sorted(run_root.glob("nightly_window_*/OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json"), reverse=True))
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def approval_packet_safety_status_is_strict(safety: Any) -> bool:
+    if not isinstance(safety, dict):
+        return False
+    return (
+        safety.get("model_calls_allowed") is False
+        and safety.get("openhands_allowed") is False
+        and safety.get("source_writes_allowed") is False
+        and safety.get("github_pr_created") is False
+        and safety.get("branch_pushed") is False
+        and safety.get("merge_performed") is False
+        and safety.get("auto_merge_allowed") is False
+        and safety.get("auto_push_allowed") is False
+        and safety.get("auto_apply_allowed", False) is False
+        and safety.get("cleanup_allowed", False) is False
+        and safety.get("worktree_cleanup_allowed", False) is False
+        and safety.get("max_code_writing_tasks") == 0
+    )
+
+
+def approval_packet_safety_status_is_phase20_gated(safety: Any, approval_dir: Path, nightly_window_dir: Path | None) -> tuple[bool, dict[str, Any]]:
+    details: dict[str, Any] = {}
+    if not isinstance(safety, dict):
+        return False, {"reason": "safety_status is not an object"}
+    non_code_denials = (
+        safety.get("model_calls_allowed") is False
+        and safety.get("source_writes_allowed") is False
+        and safety.get("github_pr_created") is False
+        and safety.get("branch_pushed") is False
+        and safety.get("merge_performed") is False
+        and safety.get("auto_merge_allowed") is False
+        and safety.get("auto_push_allowed") is False
+        and safety.get("auto_apply_allowed", False) is False
+        and safety.get("cleanup_allowed", False) is False
+        and safety.get("worktree_cleanup_allowed", False) is False
+    )
+    if not non_code_denials:
+        return False, {"reason": "non-code write safety flags are not denied"}
+    if safety.get("openhands_allowed") not in {False, True} or safety.get("max_code_writing_tasks") != 1:
+        return False, {"reason": "Phase 20 requires max_code_writing_tasks 1 and bounded OpenHands allowance"}
+
+    summary_paths = phase20_overnight_summary_paths_for_approval(approval_dir, nightly_window_dir)
+    if not summary_paths:
+        return False, {"reason": "no nightly window is available"}
+    checked: list[dict[str, Any]] = []
+    for summary_path in summary_paths:
+        data, error = load_json_file(summary_path)
+        if error is not None:
+            checked.append({"summary_path": str(summary_path), "failure": error})
+            continue
+        ok, failures = phase20_overnight_summary_allows_gated_code_writing(data)
+        if ok:
+            details["summary_path"] = str(summary_path)
+            if summary_path != summary_paths[0]:
+                details["summary_source"] = "historical_phase20_nightly_window"
+            return True, details
+        checked.append({"summary_path": str(summary_path), "failures": failures})
+    return False, {"checked_summaries": checked}
+
+
+def validate_human_approval_artifacts(recorder: CheckRecorder, approval_dir: Path, nightly_window_dir: Path | None = None) -> None:
     packet = validate_json_artifact(recorder, "approval_packet_parse", approval_dir / "APPROVAL_PACKET.json")
     summary = validate_json_artifact(
         recorder,
@@ -1655,18 +1814,24 @@ def validate_human_approval_artifacts(recorder: CheckRecorder, approval_dir: Pat
         else:
             recorder.fail_check("approval_packet_generated_by", "Approval packet generated_by must be deterministic_human_approval_scaffold", path=approval_dir / "APPROVAL_PACKET.json")
         safety = packet.get("safety_status")
-        if isinstance(safety, dict) and (
-            safety.get("model_calls_allowed") is False
-            and safety.get("openhands_allowed") is False
-            and safety.get("source_writes_allowed") is False
-            and safety.get("github_pr_created") is False
-            and safety.get("branch_pushed") is False
-            and safety.get("merge_performed") is False
-            and safety.get("max_code_writing_tasks") == 0
-        ):
-            recorder.pass_check("approval_packet_safety_flags", "Approval packet preserves Phase 17 safety flags", path=approval_dir / "APPROVAL_PACKET.json")
+        if approval_packet_safety_status_is_strict(safety):
+            recorder.pass_check("approval_packet_safety_flags", "Approval packet preserves default safety flags", path=approval_dir / "APPROVAL_PACKET.json")
         else:
-            recorder.fail_check("approval_packet_safety_flags", "Approval packet must deny models, OpenHands, source writes, PR creation, push, merge, and code writing", path=approval_dir / "APPROVAL_PACKET.json")
+            phase20_ok, phase20_details = approval_packet_safety_status_is_phase20_gated(safety, approval_dir, nightly_window_dir)
+            if phase20_ok:
+                recorder.pass_check(
+                    "approval_packet_safety_flags",
+                    "Approval packet allows only the gated Phase 20 OpenHands write task and denies apply/commit/push/merge/PR/cleanup",
+                    path=approval_dir / "APPROVAL_PACKET.json",
+                    details=phase20_details,
+                )
+            else:
+                recorder.fail_check(
+                    "approval_packet_safety_flags",
+                    "Approval packet must deny models, source writes, PR creation, push, merge, auto-apply, cleanup, and code writing unless a safe Phase 20 overnight summary bounds the single OpenHands write task",
+                    path=approval_dir / "APPROVAL_PACKET.json",
+                    details=phase20_details,
+                )
         if packet.get("recommended_human_decision") in {"accept", "revise", "discard", "hold"}:
             recorder.pass_check("approval_packet_decision_value", "Approval packet recommended decision is valid", path=approval_dir / "APPROVAL_PACKET.json")
         else:
@@ -1851,20 +2016,33 @@ def validate_nightly_window_artifacts(recorder: CheckRecorder, nightly_window_di
                 details={"missing": missing},
             )
         policy = manifest.get("policy")
-        if isinstance(policy, dict) and policy.get("max_code_writing_tasks") == 0 and manifest.get("max_code_writing_tasks") == 0:
-            recorder.pass_check("nightly_window_no_code_writing_tasks", "Nightly window keeps code-writing tasks disabled", path=nightly_window_dir)
+        write_task_count = manifest.get("overnight_write_task_count", 0)
+        if (
+            isinstance(policy, dict)
+            and policy.get("max_code_writing_tasks") == 0
+            and (
+                (manifest.get("max_code_writing_tasks") == 0 and write_task_count == 0)
+                or (manifest.get("max_code_writing_tasks") == 1 and write_task_count == 1)
+            )
+        ):
+            recorder.pass_check("nightly_window_no_code_writing_tasks", "Nightly window write-task count is within allowed Phase 20 bounds", path=nightly_window_dir)
         else:
-            recorder.fail_check("nightly_window_no_code_writing_tasks", "Phase 16 requires max_code_writing_tasks == 0", path=nightly_window_dir)
+            recorder.fail_check("nightly_window_no_code_writing_tasks", "Nightly window permits too many write-capable tasks", path=nightly_window_dir)
         if (
             manifest.get("model_calls_allowed") is False
-            and manifest.get("openhands_allowed") is False
+            and manifest.get("openhands_allowed") in {False, True}
             and manifest.get("source_writes_allowed") is False
             and manifest.get("auto_merge_allowed") is False
             and manifest.get("auto_push_allowed") is False
+            and write_task_count in {0, 1}
         ):
-            recorder.pass_check("nightly_window_safety_flags", "Nightly window safety flags disable models, OpenHands, source writes, auto-merge, and auto-push", path=nightly_window_dir)
+            recorder.pass_check("nightly_window_safety_flags", "Nightly window safety flags keep models disabled and write task count bounded", path=nightly_window_dir)
         else:
-            recorder.fail_check("nightly_window_safety_flags", "Nightly window safety flags must disable models, OpenHands, source writes, auto-merge, and auto-push", path=nightly_window_dir)
+            recorder.fail_check("nightly_window_safety_flags", "Nightly window safety flags are outside Phase 20 bounds", path=nightly_window_dir)
+        if write_task_count <= 1:
+            recorder.pass_check("nightly_window_write_task_limit", "Nightly manifest has no more than one write-capable OpenHands task", path=nightly_window_dir)
+        else:
+            recorder.fail_check("nightly_window_write_task_limit", "Nightly manifest must not contain more than one write-capable OpenHands task", path=nightly_window_dir)
 
     if isinstance(timeline, dict):
         passes = timeline.get("passes")
@@ -1885,13 +2063,103 @@ def validate_nightly_window_artifacts(recorder: CheckRecorder, nightly_window_di
     if isinstance(safety, dict):
         if (
             safety.get("model_calls_allowed") is False
-            and safety.get("openhands_allowed") is False
+            and safety.get("openhands_allowed") in {False, True}
             and safety.get("source_writes_allowed") is False
-            and safety.get("max_code_writing_tasks") == 0
+            and safety.get("max_code_writing_tasks") in {0, 1}
         ):
-            recorder.pass_check("nightly_safety_status_control_plane_only", "Nightly safety status preserves control-plane-only behavior", path=nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json")
+            recorder.pass_check("nightly_safety_status_control_plane_only", "Nightly safety status stays within Phase 20 write-task bounds", path=nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json")
         else:
-            recorder.fail_check("nightly_safety_status_control_plane_only", "Nightly safety status must preserve control-plane-only behavior", path=nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json")
+            recorder.fail_check("nightly_safety_status_control_plane_only", "Nightly safety status exceeds Phase 20 bounds", path=nightly_window_dir / "NIGHTLY_SAFETY_STATUS.json")
+
+    overnight_summary_path = nightly_window_dir / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json"
+    if overnight_summary_path.exists():
+        validate_overnight_openhands_write_summary(recorder, overnight_summary_path)
+        validate_text_artifact(recorder, "overnight_openhands_morning_report_readable", nightly_window_dir / "OVERNIGHT_OPENHANDS_MORNING_REPORT.md")
+
+
+def validate_overnight_openhands_write_summary(recorder: CheckRecorder, summary_path: Path) -> None:
+    data = validate_json_artifact(recorder, "overnight_openhands_write_summary_parse", summary_path)
+    if not isinstance(data, dict):
+        recorder.fail_check("overnight_openhands_write_summary_object", "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json must be an object", path=summary_path)
+        return
+    if data.get("generated_by") == OVERNIGHT_OPENHANDS_GENERATED_BY:
+        recorder.pass_check("overnight_openhands_generated_by", "Overnight OpenHands summary generated_by is Phase 20", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_generated_by", f"Overnight OpenHands summary generated_by is invalid: {data.get('generated_by')!r}", path=summary_path)
+    if data.get("max_write_tasks") == 1:
+        recorder.pass_check("overnight_openhands_max_write_tasks", "max_write_tasks is 1", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_max_write_tasks", f"max_write_tasks must be 1; found {data.get('max_write_tasks')!r}", path=summary_path)
+    if data.get("max_retries_per_task") == 1:
+        recorder.pass_check("overnight_openhands_max_retries", "max_retries_per_task is 1", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_max_retries", f"max_retries_per_task must be 1; found {data.get('max_retries_per_task')!r}", path=summary_path)
+    attempts = data.get("attempts")
+    if isinstance(attempts, list) and len(attempts) <= 2:
+        recorder.pass_check("overnight_openhands_attempt_count", "attempt count is no more than 2", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_attempt_count", "attempts must be a list with no more than 2 entries", path=summary_path)
+        attempts = attempts if isinstance(attempts, list) else []
+    for attempt in attempts:
+        if isinstance(attempt, dict) and attempt.get("applied") is False:
+            recorder.pass_check("overnight_openhands_attempt_not_applied", f"attempt {attempt.get('attempt_number')} did not apply a patch", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_attempt_not_applied", "every overnight OpenHands attempt must have applied false", path=summary_path)
+    if data.get("no_apply_commit_push_merge_pr_or_cleanup_performed") is True:
+        recorder.pass_check("overnight_openhands_no_apply_commit_push", "No apply/commit/push/merge/PR/cleanup invariant is true", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_no_apply_commit_push", "No apply/commit/push/merge/PR/cleanup invariant must be true", path=summary_path)
+    if data.get("canonical_repo_clean_after") is True:
+        recorder.pass_check("overnight_openhands_canonical_clean_after", "canonical repo clean after is true", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_canonical_clean_after", "canonical repo must be clean after overnight OpenHands run", path=summary_path)
+    if data.get("applied") is False:
+        recorder.pass_check("overnight_openhands_not_applied", "summary applied is false", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_not_applied", "summary applied must be false", path=summary_path)
+
+    safe_for_approval, safety_failures = phase20_overnight_summary_allows_gated_code_writing(data)
+    if safe_for_approval:
+        recorder.pass_check("overnight_openhands_phase20_gated_safety", "Phase 20 overnight summary is safe for gated approval-packet code-writing allowance", path=summary_path)
+    else:
+        recorder.fail_check(
+            "overnight_openhands_phase20_gated_safety",
+            "Phase 20 overnight summary is not safe for gated approval-packet code-writing allowance",
+            path=summary_path,
+            details={"failures": safety_failures},
+        )
+
+    status = data.get("status")
+    if status == "pass":
+        allowed = set(str(path) for path in data.get("allowed_files", []) if isinstance(path, str))
+        changed = [str(path) for path in data.get("changed_files", []) if isinstance(path, str)]
+        if data.get("selected_attempt_status") == "pass":
+            recorder.pass_check("overnight_openhands_pass_selected_attempt", "selected attempt status is pass", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_pass_selected_attempt", "pass summary requires selected attempt status pass", path=summary_path)
+        if data.get("decision_recommendation") == "accept_for_manual_review":
+            recorder.pass_check("overnight_openhands_pass_decision", "decision recommendation is accept_for_manual_review", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_pass_decision", "pass summary requires accept_for_manual_review", path=summary_path)
+        if data.get("apply_mode") == "check_only":
+            recorder.pass_check("overnight_openhands_pass_apply_mode", "apply mode is check_only", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_pass_apply_mode", "pass summary requires apply_mode check_only", path=summary_path)
+        if data.get("apply_check_passed") is True:
+            recorder.pass_check("overnight_openhands_pass_apply_check", "apply check passed", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_pass_apply_check", "pass summary requires apply_check_passed true", path=summary_path)
+        if changed and all(path in allowed for path in changed):
+            recorder.pass_check("overnight_openhands_pass_changed_files", "changed files are nonempty and within allowed files", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_pass_changed_files", "pass summary requires nonempty changed_files within allowed_files", path=summary_path)
+    elif status == "blocked":
+        if data.get("blocked") is True and data.get("blocked_reason") and data.get("recommended_human_action"):
+            recorder.pass_check("overnight_openhands_blocked_shape", "blocked summary has reason and recommended action", path=summary_path)
+        else:
+            recorder.fail_check("overnight_openhands_blocked_shape", "blocked summary requires blocked true, blocked_reason, and recommended_human_action", path=summary_path)
+    else:
+        recorder.fail_check("overnight_openhands_status", f"Overnight OpenHands summary status must be pass or blocked; found {status!r}", path=summary_path)
 
 
 def validate_model_routing_plan(

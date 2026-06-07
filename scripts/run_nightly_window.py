@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any, Callable
@@ -193,7 +194,35 @@ def update_latest_symlink(run_dir: Path, project_id: str) -> None:
     latest.symlink_to(run_dir, target_is_directory=True)
 
 
-def build_safety_status(project_id: str, created_utc: str, run_dir: Path, policy: dict[str, Any]) -> dict[str, Any]:
+def overnight_env_any_present() -> bool:
+    return any(
+        os.environ.get(name)
+        for name in (
+            "AGENT_MANAGER_ENABLE_OVERNIGHT_OPENHANDS",
+            "AGENT_MANAGER_ENABLE_OPENHANDS",
+            "AGENT_MANAGER_OVERNIGHT_OPENHANDS_CONFIRM_PROJECT",
+            "AGENT_MANAGER_OVERNIGHT_OPENHANDS_REQUEST_DIR",
+        )
+    )
+
+
+def overnight_env_all_present(project_id: str) -> bool:
+    return (
+        os.environ.get("AGENT_MANAGER_ENABLE_OVERNIGHT_OPENHANDS") == "1"
+        and os.environ.get("AGENT_MANAGER_ENABLE_OPENHANDS") == "1"
+        and os.environ.get("AGENT_MANAGER_OVERNIGHT_OPENHANDS_CONFIRM_PROJECT") == project_id
+        and bool(os.environ.get("AGENT_MANAGER_OVERNIGHT_OPENHANDS_REQUEST_DIR"))
+    )
+
+
+def build_safety_status(
+    project_id: str,
+    created_utc: str,
+    run_dir: Path,
+    policy: dict[str, Any],
+    *,
+    overnight_openhands_attempted: bool = False,
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "project_id": project_id,
@@ -201,12 +230,14 @@ def build_safety_status(project_id: str, created_utc: str, run_dir: Path, policy
         "run_dir": str(run_dir),
         "status": "pass",
         "model_calls_allowed": False,
-        "openhands_allowed": False,
+        "openhands_allowed": overnight_openhands_attempted,
         "source_writes_allowed": False,
         "auto_merge_allowed": False,
         "auto_push_allowed": False,
         "permission_expansion_allowed": False,
-        "max_code_writing_tasks": policy["max_code_writing_tasks"],
+        "max_code_writing_tasks": 1 if overnight_openhands_attempted else policy["max_code_writing_tasks"],
+        "max_retries_per_task": 1,
+        "overnight_openhands_attempted": overnight_openhands_attempted,
         "deterministic_validation_authority_preserved": True,
     }
 
@@ -220,7 +251,9 @@ def build_manifest(
     policy: dict[str, Any],
     timeline: list[dict[str, Any]],
     status: str,
+    overnight_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    overnight_attempted = overnight_summary is not None
     return {
         "schema_version": 1,
         "project_id": project_id,
@@ -230,12 +263,15 @@ def build_manifest(
         "policy": policy,
         "pass_count": len(timeline),
         "max_manager_passes": policy["max_manager_passes"],
-        "max_code_writing_tasks": policy["max_code_writing_tasks"],
+        "max_code_writing_tasks": 1 if overnight_attempted else policy["max_code_writing_tasks"],
         "model_calls_allowed": False,
-        "openhands_allowed": False,
+        "openhands_allowed": overnight_attempted,
         "source_writes_allowed": False,
         "auto_merge_allowed": False,
         "auto_push_allowed": False,
+        "overnight_write_task_count": 1 if overnight_attempted else 0,
+        "overnight_openhands_write_summary": str(Path(overnight_summary["run_dir"]) / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json") if overnight_summary and overnight_summary.get("run_dir") else "",
+        "overnight_openhands_morning_report": str(Path(overnight_summary["run_dir"]) / "OVERNIGHT_OPENHANDS_MORNING_REPORT.md") if overnight_summary and overnight_summary.get("run_dir") else "",
         "status": status,
         "generated_by": GENERATED_BY,
     }
@@ -247,18 +283,26 @@ def build_pass_summary(
     run_dir: Path,
     timeline: list[dict[str, Any]],
     latest_summary: dict[str, Any],
+    overnight_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     failed = [item for item in timeline if item["status"] != "pass"]
+    overnight_status = overnight_summary.get("status") if overnight_summary else None
+    status = "pass" if not failed else "fail"
+    if overnight_status == "blocked":
+        status = "blocked"
+    elif overnight_status == "fail":
+        status = "fail"
     return {
         "schema_version": 1,
         "project_id": project_id,
         "created_utc": created_utc,
         "run_dir": str(run_dir),
-        "status": "pass" if not failed else "fail",
+        "status": status,
         "pass_count": len(timeline),
         "failed_pass_count": len(failed),
         "passes": timeline,
         "latest_artifact_summary": latest_summary,
+        "overnight_openhands_write_summary": overnight_summary or {},
     }
 
 
@@ -281,6 +325,7 @@ def build_handoff(
     pass_summary: dict[str, Any],
     latest_summary: dict[str, Any],
     safety_status: dict[str, Any],
+    overnight_summary: dict[str, Any] | None = None,
 ) -> str:
     recommendation = "accept" if pass_summary["status"] == "pass" and safety_status["status"] == "pass" else "review"
     next_action = "Review latest validation and model routing artifacts before starting new work."
@@ -340,6 +385,17 @@ def build_handoff(
     lines.extend(
         [
             "",
+            "## Overnight OpenHands Write",
+            "",
+            f"- Status: {(overnight_summary or {}).get('status', 'not run')}",
+            f"- OpenHands run dir: {(overnight_summary or {}).get('selected_attempt_run_dir', 'not run')}",
+            f"- Changed files: {json.dumps((overnight_summary or {}).get('changed_files', []))}",
+            f"- Decision packet recommendation: {(overnight_summary or {}).get('decision_recommendation', 'not run')}",
+            f"- Apply check result: {(overnight_summary or {}).get('apply_check_passed', 'not run')}",
+            f"- Recommended human action: {(overnight_summary or {}).get('recommended_human_action', 'not run')}",
+            f"- Canonical repo clean: {(overnight_summary or {}).get('canonical_repo_clean_after', 'not run')}",
+            "- No apply/commit/push/merge/PR/cleanup performed: true",
+            "",
             "## Recommendation",
             "",
             recommendation,
@@ -351,6 +407,51 @@ def build_handoff(
         ]
     )
     return "\n".join(lines)
+
+
+def run_overnight_openhands_node(
+    project_id: str,
+    run_dir: Path,
+    command_runner: CommandRunner,
+) -> tuple[dict[str, Any] | None, str]:
+    if not overnight_env_any_present():
+        return None, "not_requested"
+    request_dir = os.environ.get("AGENT_MANAGER_OVERNIGHT_OPENHANDS_REQUEST_DIR", "")
+    command = [
+        "python3",
+        "scripts/run_overnight_openhands_write_task.py",
+        project_id,
+        "--request-dir",
+        request_dir,
+        "--confirm-project",
+        os.environ.get("AGENT_MANAGER_OVERNIGHT_OPENHANDS_CONFIRM_PROJECT", ""),
+        "--nightly-run-dir",
+        str(run_dir),
+    ]
+    if os.environ.get("AGENT_MANAGER_ENABLE_OVERNIGHT_OPENHANDS") == "1":
+        command.append("--allow-overnight-openhands")
+    result = command_runner(command)
+    summary_path = run_dir / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json"
+    try:
+        summary = load_json(summary_path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        summary = {
+            "schema_version": 1,
+            "generated_by": "phase20_first_overnight_write_capable_run",
+            "project_id": project_id,
+            "run_dir": str(run_dir),
+            "status": "fail",
+            "blocked": False,
+            "blocked_reason": "overnight write script did not produce summary",
+            "recommended_human_action": "Inspect nightly stdout/stderr and rerun with valid gates.",
+            "attempts": [],
+            "no_apply_commit_push_merge_pr_or_cleanup_performed": True,
+        }
+        write_json(summary_path, summary)
+    if result.returncode != 0 and summary.get("status") == "pass":
+        summary["status"] = "fail"
+        write_json(summary_path, summary)
+    return summary if isinstance(summary, dict) else None, str(result.returncode)
 
 
 def run_window(
@@ -385,10 +486,26 @@ def run_window(
             break
 
     latest_summary = summarize_latest_artifacts(project_id)
-    pass_summary = build_pass_summary(project_id, created, run_dir, timeline, latest_summary)
+    overnight_summary, overnight_returncode = run_overnight_openhands_node(project_id, run_dir, command_runner)
+    if overnight_summary is not None:
+        if overnight_summary.get("status") == "blocked":
+            status = "blocked"
+        elif overnight_summary.get("status") != "pass":
+            status = "fail"
+    pass_summary = build_pass_summary(project_id, created, run_dir, timeline, latest_summary, overnight_summary)
     if pass_summary["status"] == "fail":
         status = "fail"
-    safety_status = build_safety_status(project_id, created, run_dir, policy)
+    elif pass_summary["status"] == "blocked":
+        status = "blocked"
+    safety_status = build_safety_status(
+        project_id,
+        created,
+        run_dir,
+        policy,
+        overnight_openhands_attempted=overnight_summary is not None,
+    )
+    if status == "fail":
+        safety_status["status"] = "fail"
     manifest = build_manifest(
         project_id=project_id,
         created_utc=created,
@@ -397,6 +514,7 @@ def run_window(
         policy=policy,
         timeline=timeline,
         status=status,
+        overnight_summary=overnight_summary,
     )
     timeline_report = build_timeline(project_id, created, run_dir, timeline)
     handoff = build_handoff(
@@ -407,7 +525,10 @@ def run_window(
         pass_summary=pass_summary,
         latest_summary=latest_summary,
         safety_status=safety_status,
+        overnight_summary=overnight_summary,
     )
+    if overnight_summary is not None:
+        manifest["overnight_openhands_returncode"] = overnight_returncode
 
     write_json(run_dir / "NIGHTLY_WINDOW_MANIFEST.json", manifest)
     write_json(run_dir / "NIGHTLY_WINDOW_TIMELINE.json", timeline_report)
