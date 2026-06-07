@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts import run_nightly_window
 from scripts import validate_agent_run
@@ -108,6 +110,89 @@ class NightlyWindowTests(unittest.TestCase):
             safety = json.loads((root / "runs" / project_id / "latest_nightly_window" / "NIGHTLY_SAFETY_STATUS.json").read_text())
             self.assertEqual(safety["max_code_writing_tasks"], 0)
             self.assertFalse(safety["openhands_allowed"])
+
+    def test_run_nightly_window_default_behavior_unchanged_without_env_gates(self) -> None:
+        tmp, root, project_id, manifest = self.run_sample()
+        with tmp:
+            self.assertEqual(manifest.get("overnight_write_task_count"), 0)
+            run_dir = root / "runs" / project_id / "latest_nightly_window"
+            self.assertFalse((run_dir / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json").exists())
+
+    def test_run_nightly_window_calls_overnight_write_only_with_all_gates(self) -> None:
+        tmp, root, project_id = self.make_sample_root()
+        old_root = run_nightly_window.ROOT
+        run_nightly_window.ROOT = root
+        calls: list[list[str]] = []
+
+        def fake_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if "scripts/run_overnight_openhands_write_task.py" in command:
+                run_dir = Path(command[command.index("--nightly-run-dir") + 1])
+                summary = {
+                    "schema_version": 1,
+                    "generated_by": "phase20_first_overnight_write_capable_run",
+                    "project_id": project_id,
+                    "created_utc": "20260605T010203Z",
+                    "run_dir": str(run_dir),
+                    "request_dir": str(root / "request"),
+                    "request_sha256": "x",
+                    "objective_id": "phase16_timeboxed_langgraph_loop",
+                    "risk_level": "low",
+                    "allowed_files": ["docs/example.md"],
+                    "expected_changed_files": ["docs/example.md"],
+                    "max_write_tasks": 1,
+                    "max_retries_per_task": 1,
+                    "attempts": [
+                        {
+                            "attempt_number": 1,
+                            "run_dir": str(root / "attempt"),
+                            "status": "pass",
+                            "failure_classification": "none",
+                            "retryable": False,
+                            "changed_files": ["docs/example.md"],
+                            "decision_recommendation": "accept_for_manual_review",
+                            "apply_check_passed": True,
+                            "applied": False,
+                            "canonical_repo_clean": True,
+                        }
+                    ],
+                    "selected_attempt_run_dir": str(root / "attempt"),
+                    "selected_attempt_status": "pass",
+                    "changed_files": ["docs/example.md"],
+                    "decision_recommendation": "accept_for_manual_review",
+                    "apply_mode": "check_only",
+                    "apply_check_passed": True,
+                    "applied": False,
+                    "canonical_repo_clean_before": True,
+                    "canonical_repo_clean_after": True,
+                    "blocked": False,
+                    "blocked_reason": "",
+                    "recommended_human_action": "Review artifacts.",
+                    "status": "pass",
+                    "no_apply_commit_push_merge_pr_or_cleanup_performed": True,
+                }
+                (run_dir / "OVERNIGHT_OPENHANDS_WRITE_SUMMARY.json").write_text(json.dumps(summary) + "\n")
+                (run_dir / "OVERNIGHT_OPENHANDS_MORNING_REPORT.md").write_text("Selected objective\nOpenHands run dir\nChanged files\nDecision packet recommendation\nApply check result\nValidation result\nRecommended human action\n")
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+
+        env = {
+            "AGENT_MANAGER_ENABLE_OVERNIGHT_OPENHANDS": "1",
+            "AGENT_MANAGER_ENABLE_OPENHANDS": "1",
+            "AGENT_MANAGER_OVERNIGHT_OPENHANDS_CONFIRM_PROJECT": project_id,
+            "AGENT_MANAGER_OVERNIGHT_OPENHANDS_REQUEST_DIR": str(root / "request"),
+        }
+        try:
+            with tmp, patch.dict(os.environ, env, clear=True):
+                manifest = run_nightly_window.run_window(
+                    project_id,
+                    created_utc="20260605T010203Z",
+                    command_runner=fake_runner,
+                )
+            self.assertEqual(manifest["status"], "pass")
+            self.assertEqual(manifest["overnight_write_task_count"], 1)
+            self.assertTrue(any("scripts/run_overnight_openhands_write_task.py" in command for command in calls))
+        finally:
+            run_nightly_window.ROOT = old_root
 
     def test_manifest_timeline_and_handoff_shape_is_valid(self) -> None:
         tmp, root, project_id, manifest = self.run_sample()
