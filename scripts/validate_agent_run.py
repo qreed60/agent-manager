@@ -523,6 +523,7 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
             resolved_dirs["latest_openhands_coder"] = str(openhands_coder_dir)
             validate_openhands_coder_artifacts(recorder, openhands_coder_dir)
             validate_openhands_apply_status(recorder, openhands_coder_dir)
+            validate_openhands_manual_gate_summary(recorder, openhands_coder_dir)
     else:
         recorder.pass_check(
             "latest_openhands_coder_optional",
@@ -531,6 +532,131 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
         )
 
     return resolved_dirs
+
+
+def validate_openhands_manual_gate_summary(recorder: CheckRecorder, coder_dir: Path) -> None:
+    """Validate OPENHANDS_MANUAL_GATE_SUMMARY.json when present."""
+    gate_path = coder_dir / "OPENHANDS_MANUAL_GATE_SUMMARY.json"
+
+    if not gate_path.exists():
+        recorder.pass_check(
+            "openhands_manual_gate_summary_optional",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json is absent; manual gate summary not validated",
+            path=gate_path,
+        )
+        return
+
+    data = validate_json_artifact(
+        recorder,
+        "openhands_manual_gate_summary_parse",
+        gate_path,
+    )
+    if data is None:
+        return  # already recorded as fail above.
+
+    # Check generated_by must be phase18j_openhands_manual_gate_runner.
+    gen_by = data.get("generated_by")
+    if gen_by == "phase18j_openhands_manual_gate_runner":
+        recorder.pass_check(
+            "openhands_manual_gate_generated_by",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json generated_by is phase18j_openhands_manual_gate_runner",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_generated_by",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json generated_by must be phase18j_openhands_manual_gate_runner; found {gen_by!r}",
+            path=gate_path,
+        )
+
+    # Check no_apply_commit_push_merge_pr_or_cleanup_performed is true.
+    nap = data.get("no_apply_commit_push_merge_pr_or_cleanup_performed")
+    if nap is True:
+        recorder.pass_check(
+            "openhands_manual_gate_no_apply_commit_push",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json no_apply_commit_push_merge_pr_or_cleanup_performed is true",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_no_apply_commit_push",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json no_apply_commit_push_merge_pr_or_cleanup_performed must be true; found {nap!r}",
+            path=gate_path,
+        )
+
+    # Check applied is false.
+    applied = data.get("applied")
+    if applied is False:
+        recorder.pass_check(
+            "openhands_manual_gate_applied_false",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json applied is false",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_applied_false",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json applied must be false; found {applied!r}",
+            path=gate_path,
+        )
+
+    # Check canonical_repo_clean is true.
+    crc = data.get("canonical_repo_clean")
+    if crc is True:
+        recorder.pass_check(
+            "openhands_manual_gate_canonical_clean",
+            "OPENHANDS_MANUAL_GATE_SUMMARY.json canonical_repo_clean is true",
+            path=gate_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_canonical_clean",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json canonical_repo_clean must be true; found {crc!r}",
+            path=gate_path,
+        )
+
+    # Check status rules.
+    status = data.get("status")
+    dry_run = data.get("dry_run")
+    openhands_executed = data.get("openhands_execution_performed")
+
+    if dry_run is True and openhands_executed is not True:
+        # Dry-run warn is acceptable.
+        if status == "warn":
+            recorder.pass_check(
+                "openhands_manual_gate_dryrun_warn",
+                f"OPENHANDS_MANUAL_GATE_SUMMARY.json dry-run warn accepted (dry_run={dry_run}, openhands_execution_performed={openhands_executed})",
+                path=gate_path,
+            )
+        else:
+            recorder.fail_check(
+                "openhands_manual_gate_dryrun_warn",
+                f"OPENHANDS_MANUAL_GATE_SUMMARY.json dry-run summary should have status warn; found {status!r}",
+                path=gate_path,
+            )
+    elif openhands_executed is True:
+        # Live run: accept pass only.
+        if status == "pass":
+            recorder.pass_check(
+                "openhands_manual_gate_live_pass",
+                f"OPENHANDS_MANUAL_GATE_SUMMARY.json live pass accepted (dry_run={dry_run}, openhands_execution_performed={openhands_executed})",
+                path=gate_path,
+            )
+        else:
+            recorder.fail_check(
+                "openhands_manual_gate_live_fail",
+                f"OPENHANDS_MANUAL_GATE_SUMMARY.json live run status must be pass; found {status!r}",
+                path=gate_path,
+            )
+    else:
+        # Neither dry-run nor live execution detected.
+        recorder.fail_check(
+            "openhands_manual_gate_status_unknown",
+            f"OPENHANDS_MANUAL_GATE_SUMMARY.json unexpected state: dry_run={dry_run}, openhands_execution_performed={openhands_executed}",
+            path=gate_path,
+        )
+
+    # Validate markdown artifact when JSON is present.
+    validate_text_artifact(recorder, "openhands_manual_gate_summary_md_readable", coder_dir / "OPENHANDS_MANUAL_GATE_SUMMARY.md")
 
 
 def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path) -> None:

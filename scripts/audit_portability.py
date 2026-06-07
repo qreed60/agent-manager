@@ -34,6 +34,8 @@ PHASE_PREFIXES = (
     "phase18e_",
     "phase18f_",
     "phase18g_",
+    "phase18i_",
+    "phase18j_",
 )
 CATEGORIES = [
     "allowed_project_config",
