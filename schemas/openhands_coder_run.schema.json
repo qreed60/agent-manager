@@ -19,7 +19,13 @@
     "schema_version": { "const": 1 },
     "project_id": { "type": "string", "minLength": 1 },
     "created_utc": { "type": "string", "minLength": 1 },
-    "generated_by": { "const": "phase18b_controlled_openhands_coder_execution" },
+    "generated_by": {
+      "enum": [
+        "phase18b_controlled_openhands_coder_execution",
+        "phase18e_fresh_worktree_and_scope_guard",
+        "phase18f_manual_nonsmoke_write_gate"
+      ]
+    },
     "status": { "enum": ["pass", "warn", "fail"] },
     "objective": { "type": "object" },
     "canonical_repo": { "type": "string", "minLength": 1 },
@@ -30,6 +36,14 @@
     "command_argv_redacted": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "manual_allowed_files": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "task_override_used": { "type": "boolean" },
+    "task_type": {
+      "enum": ["generated", "smoke", "manual_task_text", "manual_task_file"]
     },
     "execution_performed": { "type": "boolean" },
     "required_artifacts": {
