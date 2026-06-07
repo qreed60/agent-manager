@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from scripts import prepare_openhands_decision_packet
 from scripts import run_openhands_coder_task
 from scripts import validate_agent_run
 
@@ -739,6 +740,247 @@ class OpenHandsCoderTaskTests(unittest.TestCase):
             run_dir = Path(summary["run_dir"])
             coder_run = json.loads((run_dir / "OPENHANDS_CODER_RUN.json").read_text())
             self.assertFalse(coder_run.get("fresh_worktree_created"), "dry runs must not create fresh worktrees")
+
+    def test_decision_packet_generation_from_successful_manual_run(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id, created_utc="20260605T121000Z")
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            run_dir = Path(summary["run_dir"])
+            self.assertTrue((run_dir / "OPENHANDS_DECISION_PACKET.json").exists())
+            self.assertTrue((run_dir / "OPENHANDS_DECISION_PACKET.md").exists())
+            self.assertTrue((run_dir / "OPENHANDS_PATCH.diff").exists())
+            self.assertEqual(packet["generated_by"], "phase18g_openhands_decision_packet")
+            self.assertEqual(packet["recommendation"], "accept_for_manual_review")
+
+    def test_decision_packet_smoke_recommends_discard_worktree(self) -> None:
+        tmp, root, project_id, _summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            smoke_task=True,
+            write_smoke_file=True,
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            self.assertEqual(packet["task_type"], "smoke")
+            self.assertEqual(packet["recommendation"], "discard_worktree")
+
+    def test_decision_packet_manual_scoped_changes_recommend_accept(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, _summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            self.assertEqual(packet["recommendation"], "accept_for_manual_review")
+            self.assertTrue(packet["patch_nonempty"])
+
+    def test_decision_packet_timeout_recommends_hold_for_debug(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, _summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            timeout_on_run=True,
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            self.assertEqual(packet["recommendation"], "hold_for_debug")
+
+    def test_decision_packet_scope_failure_recommends_discard_worktree(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, _summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed, "extra.txt"],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            self.assertEqual(packet["recommendation"], "discard_worktree")
+
+    def test_decision_packet_dirty_canonical_recommends_human_review_required(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            scope_path = Path(summary["run_dir"]) / "OPENHANDS_SCOPE_STATUS.json"
+            scope = json.loads(scope_path.read_text())
+            scope["scope_status"] = "pass"
+            scope["details"] = "canonical repo is dirty"
+            scope_path.write_text(json.dumps(scope) + "\n")
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            self.assertFalse(packet["canonical_repo_clean"])
+            self.assertEqual(packet["recommendation"], "human_review_required")
+
+    def test_decision_packet_patch_file_created_and_sha256_recorded(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, _summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            patch_path = Path(packet["patch_file"])
+            self.assertTrue(patch_path.exists())
+            self.assertEqual(packet["patch_sha256"], prepare_openhands_decision_packet.sha256_file(patch_path))
+            self.assertTrue(packet["patch_nonempty"])
+
+    def test_validation_fails_on_decision_packet_patch_hash_mismatch(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            packet_path = Path(summary["run_dir"]) / "OPENHANDS_DECISION_PACKET.json"
+            packet = json.loads(packet_path.read_text())
+            packet["patch_sha256"] = "0" * 64
+            packet_path.write_text(json.dumps(packet) + "\n")
+            recorder = validate_agent_run.CheckRecorder()
+            validate_agent_run.validate_openhands_decision_packet_artifacts(recorder, Path(summary["run_dir"]))
+            failed_ids = {check["id"] for check in recorder.failures()}
+            self.assertIn("openhands_decision_patch_sha256", failed_ids)
+
+    def test_validation_fails_on_decision_packet_canonical_repo_dirty(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            packet_path = Path(summary["run_dir"]) / "OPENHANDS_DECISION_PACKET.json"
+            packet = json.loads(packet_path.read_text())
+            packet["canonical_repo_clean"] = False
+            packet_path.write_text(json.dumps(packet) + "\n")
+            recorder = validate_agent_run.CheckRecorder()
+            validate_agent_run.validate_openhands_decision_packet_artifacts(recorder, Path(summary["run_dir"]))
+            failed_ids = {check["id"] for check in recorder.failures()}
+            self.assertIn("openhands_decision_canonical_repo_clean", failed_ids)
+
+    def test_validation_fails_on_decision_packet_scope_status_fail(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            packet_path = Path(summary["run_dir"]) / "OPENHANDS_DECISION_PACKET.json"
+            packet = json.loads(packet_path.read_text())
+            packet["scope_status"]["scope_status"] = "fail"
+            packet_path.write_text(json.dumps(packet) + "\n")
+            recorder = validate_agent_run.CheckRecorder()
+            validate_agent_run.validate_openhands_decision_packet_artifacts(recorder, Path(summary["run_dir"]))
+            failed_ids = {check["id"] for check in recorder.failures()}
+            self.assertIn("openhands_decision_scope_status_not_fail", failed_ids)
+
+    def test_review_commands_and_cleanup_plan_are_generated_without_cleanup_execution(self) -> None:
+        allowed = ".agent_manager_scratch/OPENHANDS_MANUAL_WRITE_TEST.md"
+        tmp, root, project_id, summary, _runner = self.run_sample(
+            allow_openhands=True,
+            enable_env=True,
+            task_text="Create the manual write test file.",
+            allowed_files=[allowed],
+            write_files=[allowed],
+        )
+        with tmp:
+            old_root = prepare_openhands_decision_packet.ROOT
+            prepare_openhands_decision_packet.ROOT = root
+            try:
+                packet = prepare_openhands_decision_packet.prepare(project_id)
+            finally:
+                prepare_openhands_decision_packet.ROOT = old_root
+            run_dir = Path(summary["run_dir"])
+            review = (run_dir / "OPENHANDS_REVIEW_COMMANDS.md").read_text()
+            cleanup = (run_dir / "OPENHANDS_CLEANUP_PLAN.md").read_text()
+            self.assertIn("git -C", review)
+            self.assertIn("apply --check", review)
+            self.assertIn("Manual only. Do not run unless you intend to apply this patch.", review)
+            self.assertIn("worktree remove", cleanup)
+            self.assertIn("branch -D", cleanup)
+            self.assertTrue(Path(packet["worktree_path"]).exists())
 
 
 if __name__ == "__main__":

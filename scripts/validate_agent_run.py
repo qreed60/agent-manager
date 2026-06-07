@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -119,6 +120,14 @@ def validate_text_artifact(recorder: CheckRecorder, check_id: str, path: Path) -
         recorder.fail_check(check_id, f"{path.name} could not be read: {exc}", path=path)
     else:
         recorder.pass_check(check_id, f"{path.name} is readable", path=path)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def validate_latest_dir(recorder: CheckRecorder, check_id: str, path: Path) -> Path | None:
@@ -840,6 +849,144 @@ def validate_openhands_coder_artifacts(recorder: CheckRecorder, coder_dir: Path)
                     "Live manual OpenHands task changed no files; review as warning",
                     path=coder_dir / "OPENHANDS_CHANGED_FILES.json",
                 )
+
+    if (coder_dir / "OPENHANDS_DECISION_PACKET.json").exists():
+        validate_openhands_decision_packet_artifacts(recorder, coder_dir)
+
+
+def validate_openhands_decision_packet_artifacts(recorder: CheckRecorder, packet_dir: Path) -> None:
+    packet_path = packet_dir / "OPENHANDS_DECISION_PACKET.json"
+    packet = validate_json_artifact(recorder, "openhands_decision_packet_parse", packet_path)
+    if not isinstance(packet, dict):
+        return
+
+    required = {
+        "schema_version",
+        "generated_by",
+        "project_id",
+        "created_utc",
+        "source_run_dir",
+        "canonical_repo",
+        "worktree_path",
+        "worktree_branch",
+        "base_branch",
+        "worktree_head",
+        "prompt_source",
+        "task_type",
+        "task_override_used",
+        "manual_allowed_files",
+        "exit_status",
+        "scope_status",
+        "changed_files",
+        "untracked_files",
+        "tracked_modified_files",
+        "staged_files",
+        "worktree_changed",
+        "canonical_repo_clean",
+        "patch_file",
+        "patch_sha256",
+        "patch_nonempty",
+        "recommendation",
+    }
+    missing = sorted(required - set(packet))
+    if not missing:
+        recorder.pass_check("openhands_decision_packet_required_fields", "Decision packet has required fields", path=packet_path)
+    else:
+        recorder.fail_check(
+            "openhands_decision_packet_required_fields",
+            "Decision packet is missing required fields",
+            path=packet_path,
+            details={"missing": missing},
+        )
+
+    if packet.get("generated_by") == "phase18g_openhands_decision_packet":
+        recorder.pass_check("openhands_decision_packet_generated_by", "Decision packet generated_by is phase18g", path=packet_path)
+    else:
+        recorder.fail_check(
+            "openhands_decision_packet_generated_by",
+            f"Decision packet generated_by must be phase18g_openhands_decision_packet; found {packet.get('generated_by')!r}",
+            path=packet_path,
+        )
+
+    patch_raw = packet.get("patch_file")
+    patch_path = Path(patch_raw) if isinstance(patch_raw, str) and patch_raw else packet_dir / "OPENHANDS_PATCH.diff"
+    if not patch_path.is_absolute():
+        patch_path = packet_dir / patch_path
+    if patch_path.exists():
+        recorder.pass_check("openhands_decision_patch_exists", "Decision packet patch file exists", path=patch_path)
+        actual_hash = sha256_file(patch_path)
+        if packet.get("patch_sha256") == actual_hash:
+            recorder.pass_check("openhands_decision_patch_sha256", "Decision packet patch_sha256 matches patch file", path=patch_path)
+        else:
+            recorder.fail_check(
+                "openhands_decision_patch_sha256",
+                "Decision packet patch_sha256 does not match patch file",
+                path=patch_path,
+                details={"expected": packet.get("patch_sha256"), "actual": actual_hash},
+            )
+    else:
+        recorder.fail_check("openhands_decision_patch_exists", "Decision packet patch file is missing", path=patch_path)
+
+    if packet.get("canonical_repo_clean") is True:
+        recorder.pass_check("openhands_decision_canonical_repo_clean", "Decision packet reports canonical repo clean", path=packet_path)
+    else:
+        recorder.fail_check(
+            "openhands_decision_canonical_repo_clean",
+            "Decision packet must not report canonical repo writes; canonical_repo_clean must be true",
+            path=packet_path,
+        )
+
+    scope = packet.get("scope_status") if isinstance(packet.get("scope_status"), dict) else {}
+    scope_value = scope.get("scope_status") if isinstance(scope, dict) else None
+    if scope_value == "fail":
+        recorder.fail_check(
+            "openhands_decision_scope_status_not_fail",
+            f"Decision packet scope_status is fail: {scope.get('details', 'unknown') if isinstance(scope, dict) else 'unknown'}",
+            path=packet_path,
+        )
+    elif scope_value in {"pass", "warn"}:
+        recorder.pass_check("openhands_decision_scope_status_not_fail", f"Decision packet scope_status is {scope_value}", path=packet_path)
+    else:
+        recorder.fail_check(
+            "openhands_decision_scope_status_value",
+            f"Decision packet scope_status must be pass, warn, or fail; found {scope_value!r}",
+            path=packet_path,
+        )
+
+    recommendation = packet.get("recommendation")
+    allowed_recommendations = {
+        "accept_for_manual_review",
+        "discard_worktree",
+        "hold_for_debug",
+        "rerun_openhands",
+        "human_review_required",
+    }
+    if recommendation in allowed_recommendations:
+        recorder.pass_check("openhands_decision_recommendation_value", f"Decision packet recommendation is {recommendation!r}", path=packet_path)
+    else:
+        recorder.fail_check(
+            "openhands_decision_recommendation_value",
+            f"Decision packet recommendation is invalid: {recommendation!r}",
+            path=packet_path,
+        )
+
+    if recommendation == "accept_for_manual_review":
+        exit_status = packet.get("exit_status") if isinstance(packet.get("exit_status"), dict) else {}
+        exit_pass = isinstance(exit_status, dict) and exit_status.get("status") == "pass" and exit_status.get("returncode") == 0 and exit_status.get("timed_out") is False
+        accept_ok = (
+            scope_value == "pass"
+            and exit_pass
+            and packet.get("patch_nonempty") is True
+            and packet.get("canonical_repo_clean") is True
+        )
+        if accept_ok:
+            recorder.pass_check("openhands_decision_accept_consistency", "accept_for_manual_review is consistent with pass/scope/patch/clean status", path=packet_path)
+        else:
+            recorder.fail_check(
+                "openhands_decision_accept_consistency",
+                "accept_for_manual_review requires exit pass, scope pass, nonempty patch, and clean canonical repo",
+                path=packet_path,
+            )
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:
