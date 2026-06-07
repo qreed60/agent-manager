@@ -522,6 +522,7 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
         if openhands_coder_dir is not None:
             resolved_dirs["latest_openhands_coder"] = str(openhands_coder_dir)
             validate_openhands_coder_artifacts(recorder, openhands_coder_dir)
+            validate_openhands_apply_status(recorder, openhands_coder_dir)
     else:
         recorder.pass_check(
             "latest_openhands_coder_optional",
@@ -987,6 +988,138 @@ def validate_openhands_decision_packet_artifacts(recorder: CheckRecorder, packet
                 "accept_for_manual_review requires exit pass, scope pass, nonempty patch, and clean canonical repo",
                 path=packet_path,
             )
+
+
+def validate_openhands_apply_status(recorder: CheckRecorder, coder_dir: Path) -> None:
+    """Validate Phase 18I guarded OpenHands apply status artifacts."""
+    apply_status_path = coder_dir / "OPENHANDS_APPLY_STATUS.json"
+
+    if not apply_status_path.exists():
+        recorder.pass_check(
+            "openhands_apply_status_optional",
+            "OPENHANDS_APPLY_STATUS.json is absent; optional Phase 18I apply gate artifacts not validated",
+            path=apply_status_path,
+        )
+        return
+
+    data = validate_json_artifact(
+        recorder,
+        "openhands_apply_status_parse",
+        apply_status_path,
+    )
+    if data is None:
+        return  # already recorded as fail above.
+
+    # Check generated_by.
+    gen_by = data.get("generated_by")
+    if gen_by == "phase18i_guarded_openhands_patch_apply":
+        recorder.pass_check(
+            "openhands_apply_status_generated_by",
+            "OPENHANDS_APPLY_STATUS.json generated_by is phase18i_guarded_openhands_patch_apply",
+            path=apply_status_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_apply_status_generated_by",
+            f"OPENHANDS_APPLY_STATUS.json generated_by must be phase18i_guarded_openhands_patch_apply; found {gen_by!r}",
+            path=apply_status_path,
+        )
+
+    # Check status is not fail.
+    status = data.get("status")
+    if status == "fail":
+        recorder.fail_check(
+            "openhands_apply_status_not_fail",
+            f"OPENHANDS_APPLY_STATUS.json status must not be 'fail'; found {status!r}",
+            path=apply_status_path,
+        )
+    elif status in ("pass", "warn"):
+        recorder.pass_check(
+            "openhands_apply_status_not_fail",
+            f"OPENHANDS_APPLY_STATUS.json status is {status!r} (not fail)",
+            path=apply_status_path,
+        )
+
+    # Check no_commit_push_merge_pr_performed.
+    nc = data.get("no_commit_push_merge_pr_performed")
+    if nc is True:
+        recorder.pass_check(
+            "openhands_apply_no_commit_push_merge_pr",
+            "OPENHANDS_APPLY_STATUS.json no_commit_push_merge_pr_performed is true",
+            path=apply_status_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_apply_no_commit_push_merge_pr",
+            f"OPENHANDS_APPLY_STATUS.json no_commit_push_merge_pr_performed must be true; found {nc!r}",
+            path=apply_status_path,
+        )
+
+    # Check patch_sha256_verified.
+    psv = data.get("patch_sha256_verified")
+    if psv is True:
+        recorder.pass_check(
+            "openhands_apply_patch_sha_verified",
+            "OPENHANDS_APPLY_STATUS.json patch sha256 verified",
+            path=apply_status_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_apply_patch_sha_verified",
+            f"OPENHANDS_APPLY_STATUS.json patch sha256 must be verified; found {psv!r}",
+            path=apply_status_path,
+        )
+
+    # Mode-specific checks.
+    mode = data.get("mode")
+    applied = data.get("applied", False)
+
+    if mode == "check_only":
+        # check-only pass requires canonical repo clean before and git_apply_check_passed true.
+        crcb = data.get("canonical_repo_clean_before")
+        if crcb is True:
+            recorder.pass_check(
+                "openhands_apply_check_only_clean_before",
+                "OPENHANDS_APPLY_STATUS.json canonical_repo_clean_before is true (check-only)",
+                path=apply_status_path,
+            )
+        else:
+            recorder.fail_check(
+                "openhands_apply_check_only_clean_before",
+                f"check-only pass requires canonical_repo_clean_before=true; found {crcb!r}",
+                path=apply_status_path,
+            )
+
+        gap = data.get("git_apply_check_passed")
+        if gap is True:
+            recorder.pass_check(
+                "openhands_apply_check_only_git_apply_pass",
+                "OPENHANDS_APPLY_STATUS.json git_apply_check_passed is true (check-only)",
+                path=apply_status_path,
+            )
+        else:
+            recorder.fail_check(
+                "openhands_apply_check_only_git_apply_pass",
+                f"check-only pass requires git_apply_check_passed=true; found {gap!r}",
+                path=apply_status_path,
+            )
+
+    elif mode == "apply":
+        # applied=true is allowed in apply mode; no extra requirement on canonical repo dirty state.
+        if applied:
+            recorder.pass_check(
+                "openhands_apply_mode_applied",
+                "OPENHANDS_APPLY_STATUS.json applied=true (apply mode)",
+                path=apply_status_path,
+            )
+
+    # Validate markdown artifacts when JSON is present.
+    validate_text_artifact(recorder, "openhands_apply_status_md_readable", coder_dir / "OPENHANDS_APPLY_STATUS.md")
+    validate_text_artifact(
+        recorder,
+        "openhands_apply_review_commands_md_readable",
+        coder_dir / "OPENHANDS_APPLY_REVIEW_COMMANDS.md",
+    )
 
 
 def validate_ai_readonly_artifacts(recorder: CheckRecorder, ai_dir: Path) -> None:
