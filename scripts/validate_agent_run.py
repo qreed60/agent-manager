@@ -25,6 +25,19 @@ OPENHANDS_MANUAL_GATE_FAILURE_CLASSIFICATIONS = {
     "missing_required_artifact",
     "unknown",
 }
+OPENHANDS_MANUAL_GATE_REQUEST_GENERATED_BY = "phase18k_manager_to_openhands_task_packet_bridge"
+OPENHANDS_MANUAL_GATE_REQUEST_UNSAFE_COMMAND_PATTERNS = (
+    " --apply",
+    "--allow-canonical-write",
+    "git apply",
+    "git commit",
+    "git push",
+    "git merge",
+    "gh pr",
+    "hub pull-request",
+    "worktree remove",
+    "branch -D",
+)
 
 
 class CheckRecorder:
@@ -544,7 +557,149 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
             path=openhands_coder_pointer,
         )
 
+    openhands_manual_gate_request_pointer = run_root / "latest_openhands_manual_gate_request"
+    if openhands_manual_gate_request_pointer.exists() or openhands_manual_gate_request_pointer.is_symlink():
+        request_dir = validate_latest_dir(
+            recorder,
+            "latest_openhands_manual_gate_request_dir",
+            openhands_manual_gate_request_pointer,
+        )
+        if request_dir is not None:
+            resolved_dirs["latest_openhands_manual_gate_request"] = str(request_dir)
+            validate_openhands_manual_gate_request(recorder, request_dir)
+    else:
+        recorder.pass_check(
+            "latest_openhands_manual_gate_request_optional",
+            "latest_openhands_manual_gate_request is absent; optional Phase 18K artifacts not validated",
+            path=openhands_manual_gate_request_pointer,
+        )
+
     return resolved_dirs
+
+
+def path_has_parent_traversal(path: str) -> bool:
+    return ".." in Path(path).parts
+
+
+def command_unsafe_reasons(text: str) -> list[str]:
+    lowered = text.lower()
+    return [pattern for pattern in OPENHANDS_MANUAL_GATE_REQUEST_UNSAFE_COMMAND_PATTERNS if pattern in lowered]
+
+
+def validate_openhands_manual_gate_request(recorder: CheckRecorder, request_dir: Path) -> None:
+    request_path = request_dir / "OPENHANDS_MANUAL_GATE_REQUEST.json"
+    request = validate_json_artifact(recorder, "openhands_manual_gate_request_parse", request_path)
+    if request is None:
+        return
+    if not isinstance(request, dict):
+        recorder.fail_check("openhands_manual_gate_request_object", "OPENHANDS_MANUAL_GATE_REQUEST.json must be an object", path=request_path)
+        return
+
+    gen_by = request.get("generated_by")
+    if gen_by == OPENHANDS_MANUAL_GATE_REQUEST_GENERATED_BY:
+        recorder.pass_check(
+            "openhands_manual_gate_request_generated_by",
+            "OPENHANDS_MANUAL_GATE_REQUEST.json generated_by is phase18k_manager_to_openhands_task_packet_bridge",
+            path=request_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_request_generated_by",
+            f"OPENHANDS_MANUAL_GATE_REQUEST.json generated_by must be {OPENHANDS_MANUAL_GATE_REQUEST_GENERATED_BY}; found {gen_by!r}",
+            path=request_path,
+        )
+
+    if request.get("no_openhands_execution_performed") is True:
+        recorder.pass_check("openhands_manual_gate_request_no_openhands", "OPENHANDS_MANUAL_GATE_REQUEST.json records no OpenHands execution", path=request_path)
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_request_no_openhands",
+            f"OPENHANDS_MANUAL_GATE_REQUEST.json no_openhands_execution_performed must be true; found {request.get('no_openhands_execution_performed')!r}",
+            path=request_path,
+        )
+
+    if request.get("no_apply_commit_push_merge_pr_or_cleanup_performed") is True:
+        recorder.pass_check(
+            "openhands_manual_gate_request_no_apply_commit_push",
+            "OPENHANDS_MANUAL_GATE_REQUEST.json records no apply/commit/push/merge/PR/cleanup",
+            path=request_path,
+        )
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_request_no_apply_commit_push",
+            f"OPENHANDS_MANUAL_GATE_REQUEST.json no_apply_commit_push_merge_pr_or_cleanup_performed must be true; found {request.get('no_apply_commit_push_merge_pr_or_cleanup_performed')!r}",
+            path=request_path,
+        )
+
+    status = request.get("status")
+    if status in {"pass", "warn"}:
+        recorder.pass_check("openhands_manual_gate_request_status", f"OPENHANDS_MANUAL_GATE_REQUEST.json status accepted: {status}", path=request_path)
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_request_status",
+            f"OPENHANDS_MANUAL_GATE_REQUEST.json status must be pass or warn; found {status!r}",
+            path=request_path,
+        )
+
+    task_source = request.get("task_source")
+    task_text = request.get("task_text")
+    task_file = request.get("task_file")
+    if task_source == "task_text" and isinstance(task_text, str) and task_text.strip() and not task_file:
+        recorder.pass_check("openhands_manual_gate_request_task_source", "OPENHANDS_MANUAL_GATE_REQUEST.json task_text source is valid", path=request_path)
+    elif task_source == "task_file" and isinstance(task_text, str) and task_text.strip() and isinstance(task_file, str) and task_file:
+        recorder.pass_check("openhands_manual_gate_request_task_source", "OPENHANDS_MANUAL_GATE_REQUEST.json task_file source is valid", path=request_path)
+    else:
+        recorder.fail_check(
+            "openhands_manual_gate_request_task_source",
+            f"OPENHANDS_MANUAL_GATE_REQUEST.json task source is invalid: task_source={task_source!r}, task_file={task_file!r}",
+            path=request_path,
+        )
+
+    allowed = request.get("allowed_files")
+    if isinstance(allowed, list) and allowed and all(isinstance(item, str) for item in allowed):
+        recorder.pass_check("openhands_manual_gate_request_allowed_files_present", "OPENHANDS_MANUAL_GATE_REQUEST.json allowed_files is populated", path=request_path)
+        for item in allowed:
+            if Path(item).is_absolute() or path_has_parent_traversal(item):
+                recorder.fail_check(
+                    "openhands_manual_gate_request_allowed_file_safe",
+                    f"allowed file must be relative and must not contain parent traversal: {item!r}",
+                    path=request_path,
+                )
+                break
+        else:
+            recorder.pass_check("openhands_manual_gate_request_allowed_file_safe", "OPENHANDS_MANUAL_GATE_REQUEST.json allowed_files are relative and traversal-free", path=request_path)
+    else:
+        recorder.fail_check("openhands_manual_gate_request_allowed_files_present", "OPENHANDS_MANUAL_GATE_REQUEST.json allowed_files must be a non-empty string list", path=request_path)
+
+    command_file = request.get("command_file")
+    command_markdown_file = request.get("command_markdown_file")
+    command_paths: list[Path] = []
+    for check_id, raw in (
+        ("openhands_manual_gate_request_command_file_readable", command_file),
+        ("openhands_manual_gate_request_command_markdown_readable", command_markdown_file),
+    ):
+        path = Path(str(raw)) if isinstance(raw, str) and raw else request_dir / "__missing__"
+        validate_text_artifact(recorder, check_id, path)
+        if path.exists():
+            command_paths.append(path)
+
+    for path in command_paths:
+        try:
+            content = path.read_text()
+        except OSError as exc:
+            recorder.fail_check("openhands_manual_gate_request_command_safe", f"{path.name} could not be inspected: {exc}", path=path)
+            continue
+        reasons = command_unsafe_reasons(content)
+        if reasons:
+            recorder.fail_check(
+                "openhands_manual_gate_request_command_safe",
+                f"{path.name} contains unsafe command content: {', '.join(reasons)}",
+                path=path,
+            )
+        else:
+            recorder.pass_check("openhands_manual_gate_request_command_safe", f"{path.name} contains no apply/commit/push/merge/PR/cleanup commands", path=path)
+
+    validate_text_artifact(recorder, "openhands_manual_gate_request_md_readable", request_dir / "OPENHANDS_MANUAL_GATE_REQUEST.md")
 
 
 def validate_openhands_manual_gate_summary(recorder: CheckRecorder, coder_dir: Path) -> None:
