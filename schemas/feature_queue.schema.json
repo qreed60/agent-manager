@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FeatureQueue",
+  "description": "Per-project feature queue tracking all intake feature briefs. Deterministic, non-executing.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_by",
+    "created_utc",
+    "project_id",
+    "features"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for this feature queue format."
+    },
+    "generated_by": {
+      "type": "string",
+      "enum": ["phase21_feature_brief_intake"],
+      "description": "Component that generated this artifact."
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^\\d{8}T\\d{6}Z$",
+      "description": "UTC timestamp in YYYYMMDDTHHMMSSZ format."
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Registered project identifier from configs/projects.json."
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["feature_id", "title", "status"],
+        "properties": {
+          "feature_id": {
+            "type": "string",
+            "description": "Feature identifier matching the brief."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short title from the brief."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["brief_only", "needs_clarification", "ready_for_architecture", "blocked", "archived"],
+            "description": "Current status of the feature brief."
+          },
+          "created_utc": {
+            "type": "string",
+            "pattern": "^\\d{8}T\\d{6}Z$",
+            "description": "UTC timestamp from the brief."
+          },
+          "brief_path": {
+            "type": "string",
+            "description": "Relative path to FEATURE_BRIEF.json within runs/<project_id>."
+          }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "List of feature brief entries in the queue."
+    }
+  },
+  "additionalProperties": false
+}

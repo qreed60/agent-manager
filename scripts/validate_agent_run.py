@@ -576,8 +576,238 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
             path=openhands_manual_gate_request_pointer,
         )
 
+    # Phase 21: Feature brief intake validation (intake only — no execution)
+    feature_queue_pointer = run_root / "feature_queue"
+    if feature_queue_pointer.exists() or feature_queue_pointer.is_symlink():
+        queue_dir = validate_latest_dir(recorder, "latest_feature_queue_dir", feature_queue_pointer)
+        if queue_dir is not None:
+            resolved_dirs["latest_feature_queue"] = str(queue_dir)
+            validate_phase21_feature_artifacts(recorder, queue_dir)
+
+    # Phase 21: Feature briefs directory validation
+    feature_briefs_pointer = run_root / "feature_briefs"
+    if feature_briefs_pointer.exists() or feature_briefs_pointer.is_symlink():
+        briefs_dir = validate_latest_dir(recorder, "latest_feature_briefs_dir", feature_briefs_pointer)
+        if briefs_dir is not None:
+            resolved_dirs["latest_feature_briefs"] = str(briefs_dir)
+            validate_phase21_feature_briefs_directory(recorder, briefs_dir)
+
     return resolved_dirs
 
+
+# ---------------------------------------------------------------------------
+# Phase 21 Feature Brief Validation
+# ---------------------------------------------------------------------------
+
+PHASE21_GENERATED_BY = "phase21_feature_brief_intake"
+PHASE21_VALID_STATUSES = frozenset({"brief_only", "needs_clarification", "ready_for_architecture", "blocked", "archived"})
+PHASE21_VALID_RISK_LEVELS = frozenset({"low", "medium", "high"})
+
+
+def validate_phase21_feature_artifacts(recorder: CheckRecorder, queue_dir: Path) -> None:
+    """Validate FEATURE_QUEUE.json in the feature queue directory."""
+    queue_path = queue_dir / "FEATURE_QUEUE.json"
+    queue_data = validate_json_artifact(recorder, "phase21_queue_parse", queue_path)
+    if not isinstance(queue_data, dict):
+        recorder.fail_check("phase21_queue_object", "FEATURE_QUEUE.json must be a JSON object", path=queue_path)
+        return
+
+    # Check schema_version
+    sv = queue_data.get("schema_version")
+    if sv == 1:
+        recorder.pass_check("phase21_queue_schema_version", "FEATURE_QUEUE.json has schema_version 1", path=queue_path)
+    else:
+        recorder.fail_check("phase21_queue_schema_version", f"FEATURE_QUEUE.json schema_version must be 1; found {sv!r}", path=queue_path)
+
+    # Check generated_by
+    gen = queue_data.get("generated_by")
+    if gen == PHASE21_GENERATED_BY:
+        recorder.pass_check("phase21_queue_generated_by", "FEATURE_QUEUE.json generated_by is correct", path=queue_path)
+    else:
+        recorder.fail_check("phase21_queue_generated_by", f"FEATURE_QUEUE.json generated_by must be {PHASE21_GENERATED_BY}; found {gen!r}", path=queue_path)
+
+    # Check project_id matches the validated project
+    queue_project = queue_data.get("project_id")
+    if isinstance(queue_project, str):
+        recorder.pass_check("phase21_queue_has_project_id", f"FEATURE_QUEUE.json references project {queue_project!r}", path=queue_path)
+    else:
+        recorder.fail_check("phase21_queue_has_project_id", "FEATURE_QUEUE.json must have a string project_id field", path=queue_path)
+
+    # Check features list is present and non-empty when queue exists
+    features = queue_data.get("features")
+    if isinstance(features, list):
+        recorder.pass_check("phase21_queue_features_is_list", "FEATURE_QUEUE.json features is an array", path=queue_path)
+        for idx, feat in enumerate(features):
+            if not isinstance(feat, dict):
+                recorder.fail_check(f"phase21_queue_feature_{idx}_object", f"features[{idx}] must be a JSON object", path=queue_path)
+                continue
+            fid = feat.get("feature_id")
+            status = feat.get("status")
+            brief_path = feat.get("brief_path", "")
+
+            if isinstance(fid, str) and fid:
+                recorder.pass_check(f"phase21_queue_feature_{idx}_has_id", f"features[{idx}] has feature_id {fid!r}", path=queue_path)
+            else:
+                recorder.fail_check(f"phase21_queue_feature_{idx}_has_id", f"features[{idx}] must have a non-empty feature_id", path=queue_path)
+
+            if status in PHASE21_VALID_STATUSES:
+                recorder.pass_check(f"phase21_queue_feature_{idx}_valid_status", f"features[{idx}] status {status!r} is valid", path=queue_path)
+            else:
+                recorder.fail_check(
+                    f"phase21_queue_feature_{idx}_valid_status",
+                    f"features[{idx}] status must be one of {sorted(PHASE21_VALID_STATUSES)}; found {status!r}",
+                    path=queue_path,
+                )
+
+            if isinstance(brief_path, str) and brief_path:
+                full_brief_dir = ROOT / brief_path
+                brief_json = full_brief_dir / "FEATURE_BRIEF.json"
+                if brief_json.exists():
+                    recorder.pass_check(f"phase21_queue_feature_{idx}_brief_exists", f"features[{idx}] brief artifact exists at {brief_json}", path=queue_path)
+                    _validate_phase21_brief(recorder, f"phase21_queue_feature_{idx}_brief", brief_json, queue_project)
+                else:
+                    recorder.fail_check(f"phase21_queue_feature_{idx}_brief_exists", f"features[{idx}] brief artifact not found at {brief_json}", path=queue_path)
+
+        if len(features) >= 1:
+            recorder.pass_check("phase21_queue_has_features", "FEATURE_QUEUE.json contains feature entries", path=queue_path)
+    else:
+        recorder.fail_check("phase21_queue_features_is_list", "FEATURE_QUEUE.json must have a features array", path=queue_path)
+
+
+def _validate_phase21_brief(recorder: CheckRecorder, check_prefix: str, brief_path: Path, expected_project: str | None = None) -> dict[str, Any] | None:
+    """Validate an individual FEATURE_BRIEF.json."""
+    brief_data = validate_json_artifact(recorder, f"{check_prefix}_parse", brief_path)
+    if not isinstance(brief_data, dict):
+        return None
+
+    recorder.pass_check(f"{check_prefix}_shape", "FEATURE_BRIEF.json is a valid JSON object", path=brief_path)
+
+    required_fields = [
+        "schema_version",
+        "generated_by",
+        "created_utc",
+        "project_id",
+        "feature_id",
+        "title",
+        "high_level_goal",
+        "desired_behavior",
+        "must_have_requirements",
+        "risk_level",
+        "target_project_area",
+        "human_priority",
+        "status",
+    ]
+    missing = [f for f in required_fields if f not in brief_data]
+    if not missing:
+        recorder.pass_check(f"{check_prefix}_required_fields", "FEATURE_BRIEF.json has all required fields", path=brief_path)
+    else:
+        recorder.fail_check(f"{check_prefix}_required_fields", f"FEATURE_BRIEF.json missing required fields: {missing}", path=brief_path, details={"missing": missing})
+
+    sv = brief_data.get("schema_version")
+    if sv == 1:
+        recorder.pass_check(f"{check_prefix}_schema_version", "FEATURE_BRIEF.json has schema_version 1", path=brief_path)
+    else:
+        recorder.fail_check(f"{check_prefix}_schema_version", f"FEATURE_BRIEF.json schema_version must be 1; found {sv!r}", path=brief_path)
+
+    gen = brief_data.get("generated_by")
+    if gen == PHASE21_GENERATED_BY:
+        recorder.pass_check(f"{check_prefix}_generated_by", "FEATURE_BRIEF.json generated_by is correct", path=brief_path)
+    else:
+        recorder.fail_check(f"{check_prefix}_generated_by", f"FEATURE_BRIEF.json generated_by must be {PHASE21_GENERATED_BY}; found {gen!r}", path=brief_path)
+
+    if expected_project and isinstance(expected_project, str):
+        brief_pid = brief_data.get("project_id")
+        if brief_pid == expected_project:
+            recorder.pass_check(f"{check_prefix}_project_match", f"FEATURE_BRIEF.json project_id {brief_pid!r} matches queue project", path=brief_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_project_mismatch",
+                f"FEATURE_BRIEF.json project_id {brief_pid!r} does not match expected {expected_project!r}",
+                path=brief_path,
+            )
+
+    status = brief_data.get("status")
+    if status in PHASE21_VALID_STATUSES:
+        recorder.pass_check(f"{check_prefix}_valid_status", f"FEATURE_BRIEF.json status {status!r} is valid", path=brief_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_invalid_status",
+            f"FEATURE_BRIEF.json status must be one of {sorted(PHASE21_VALID_STATUSES)}; found {status!r}",
+            path=brief_path,
+        )
+
+    risk = brief_data.get("risk_level")
+    if risk in PHASE21_VALID_RISK_LEVELS:
+        recorder.pass_check(f"{check_prefix}_valid_risk", f"FEATURE_BRIEF.json risk_level {risk!r} is valid", path=brief_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_invalid_risk",
+            f"FEATURE_BRIEF.json risk_level must be one of {sorted(PHASE21_VALID_RISK_LEVELS)}; found {risk!r}",
+            path=brief_path,
+        )
+
+    hp = brief_data.get("human_priority")
+    if isinstance(hp, (int, float)):
+        recorder.pass_check(f"{check_prefix}_numeric_priority", f"FEATURE_BRIEF.json human_priority {hp!r} is numeric", path=brief_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_priority_type",
+            f"FEATURE_BRIEF.json human_priority must be numeric; found {type(hp).__name__!r}",
+            path=brief_path,
+        )
+
+    return brief_data
+
+
+def validate_phase21_feature_briefs_directory(recorder: CheckRecorder, briefs_dir: Path) -> None:
+    """Validate that FEATURE_BRIEF.md exists alongside each FEATURE_BRIEF.json."""
+    for json_file in sorted(briefs_dir.glob("*/FEATURE_BRIEF.json")):
+        md_file = json_file.parent / "FEATURE_BRIEF.md"
+        if md_file.exists():
+            recorder.pass_check(f"phase21_brief_md_exists_for_{json_file.parent.name}", f"FEATURE_BRIEF.md exists alongside {json_file.name}", path=md_file)
+        else:
+            recorder.fail_check(f"phase21_brief_md_missing_for_{json_file.parent.name}", f"FEATURE_BRIEF.md missing for {json_file.name}", path=json_file)
+
+
+def validate_phase21_no_execution_safety(recorder: CheckRecorder, resolved_dirs: dict[str, str]) -> None:
+    """Verify Phase 21 paths do not enable model calls, OpenHands execution, or source writes."""
+    for dir_name in ("latest_feature_queue", "latest_feature_briefs"):
+        if dir_name not in resolved_dirs:
+            continue
+        dir_path = Path(resolved_dirs[dir_name])
+        for json_file in dir_path.rglob("*.json"):
+            text = json_file.read_text()
+            unsafe_flags = [
+                "model_calls_enabled",
+                "execution_enabled",
+                "source_writes_enabled",
+                "auto_merge_enabled",
+                "auto_push_enabled",
+                "apply_canonical_write",
+                "allow_canonical_write",
+                "commit_enabled",
+                "push_enabled",
+                "merge_enabled",
+                "pr_creation_enabled",
+            ]
+            found_unsafe = [flag for flag in unsafe_flags if flag in text]
+            if found_unsafe:
+                recorder.fail_check(
+                    f"phase21_no_execution_{json_file.name}",
+                    f"{json_file.name} contains execution-enabling flags: {found_unsafe}",
+                    path=json_file,
+                    details={"flags": found_unsafe},
+                )
+            else:
+                recorder.pass_check(f"phase21_no_execution_flag_{json_file.stem}", f"No execution-enabling flags in {json_file.name}", path=json_file)
+
+    recorder.pass_check(
+        "phase21_intake_only",
+        "Phase 21 is intake-only: no model calls, no OpenHands execution, no source writes to target project repos",
+    )
+
+
+# ---------------------------------------------------------------------------
 
 def path_has_parent_traversal(path: str) -> bool:
     return ".." in Path(path).parts

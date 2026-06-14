@@ -1,0 +1,268 @@
+# Agent Manager Agent Instructions
+
+## Project summary
+
+This repository is the central Agent Manager framework.
+
+It provides reusable orchestration, planning, validation, request-generation, OpenHands integration, run artifact management, and safety gates for multiple target projects.
+
+This repository must remain project-portable. Do not hard-code behavior for a single target project in generic framework code. Project-specific behavior belongs in project config, adapters, schemas, prompts, feature briefs, or project-specific state.
+
+## Python environment
+
+Use the repository virtual environment before running scripts or tests:
+
+```bash
+cd ~/agent-manager
+source .venv/bin/activate
+```
+
+If `.venv` is missing, inspect the repository setup files before installing dependencies. Do not invent dependency setup commands.
+
+After activation, prefer the venv Python:
+
+```bash
+python3 --version
+which python3
+```
+
+Do not claim tests or validation passed unless the commands actually ran and completed successfully.
+
+## Common validation commands
+
+Run focused validation for the files you changed.
+
+Python syntax check examples:
+
+```bash
+python3 -m py_compile scripts/<script>.py
+python3 -m py_compile agent_manager/<module>.py
+```
+
+Run the unit test suite:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Run the portability audit:
+
+```bash
+python3 scripts/audit_portability.py
+```
+
+Run project validation with an explicit project id:
+
+```bash
+python3 scripts/validate_agent_run.py <project_id>
+```
+
+Run the default safe nightly window with an explicit project id:
+
+```bash
+python3 scripts/run_nightly_window.py <project_id>
+```
+
+Run LangGraph v0 with an explicit project id when relevant:
+
+```bash
+python3 scripts/run_langgraph_v0.py <project_id>
+```
+
+Check user timer status when service behavior is relevant:
+
+```bash
+systemctl --user list-timers 'agent-manager-nightly@*.timer'
+systemctl --user status agent-manager-nightly@<project_id>.service --no-pager -l
+```
+
+Do not run write-capable or model-backed workflows unless the task explicitly requires them and the proper safety gates are present.
+
+## Project constraints
+
+Default behavior must be safe, deterministic, and non-destructive.
+
+Preserve these default assumptions unless the task explicitly changes them:
+
+```text
+model calls disabled by default
+OpenHands disabled by default
+source writes disabled by default
+auto-apply disabled
+auto-commit disabled
+auto-push disabled
+auto-merge disabled
+PR creation disabled
+worktree cleanup disabled unless explicitly requested
+```
+
+The framework may generate planning artifacts, request drafts, reports, validation summaries, and review artifacts.
+
+The framework must not modify a target project’s canonical repository unless explicitly approved by the user.
+
+Write-capable coder execution must be bounded by:
+
+```text
+explicit project id
+explicit request artifact
+explicit allowed files
+isolated worktree or branch
+check-only apply behavior unless otherwise approved
+deterministic validation
+human review before apply/commit/push/merge
+```
+
+Do not weaken safety gates, validators, schemas, approval-packet checks, scope guards, canonical-repo cleanliness checks, or no-apply/no-commit/no-push/no-merge guarantees.
+
+## Files and directories requiring caution
+
+```text
+configs/
+  Project registry and project-level configuration. Keep generic framework behavior separate from project-specific configuration.
+
+agent_manager/
+  Core framework code. Avoid coupling generic modules to one target project.
+
+agent_manager/adapters/
+  Project-specific adapters. Put target-specific logic here rather than in generic core code.
+
+scripts/
+  Operational entry points. Preserve safety checks, environment gates, and validation behavior.
+
+schemas/
+  Machine-readable contracts. Do not weaken schemas without explicit instruction and regression coverage.
+
+tests/
+  Add or update focused tests for changed behavior.
+
+docs/
+  Operational and design documentation. Keep docs aligned with actual behavior.
+
+profiles/
+  Agent/OpenHands profile assets. Do not include secrets or runtime credentials.
+
+runs/
+  Generated run artifacts. Do not delete unless explicitly requested.
+
+worktrees/
+  Isolated worktrees for coder runs. Do not delete or clean automatically unless explicitly requested and safe.
+
+.env
+*.env
+~/.config/agent-manager/env.local
+  Sensitive local runtime configuration. Do not print, copy into logs, or commit.
+```
+
+## Domain-specific rules
+
+The Agent Manager is a controlled automation framework, not an unrestricted autonomous coding bot.
+
+Separate planning from execution:
+
+```text
+manager/architecture agents may create plans, proposals, objectives, request drafts, and reports
+review agents may create read-only findings
+coder agents may modify files only inside approved scope
+deterministic validators decide mechanical pass/fail
+humans approve protected actions
+```
+
+Keep generic workflows project-portable:
+
+```text
+accept project_id as input
+load project config from registry
+route project-specific behavior through adapters
+write run artifacts under project-specific run directories
+avoid target-specific literals in core logic
+```
+
+When adding or changing model-backed behavior:
+
+```text
+make model calls explicit
+record prompts and outputs as artifacts
+validate JSON outputs against schemas where practical
+treat AI output as advisory until deterministic validation passes
+never let AI review override deterministic validation
+```
+
+When adding or changing OpenHands behavior:
+
+```text
+require explicit enablement
+use an isolated worktree
+enforce allowed files
+capture changed files and diff summary
+generate a decision packet
+use check-only apply unless explicitly approved
+keep canonical repos clean
+```
+
+## Service and environment rules
+
+The installed user service should remain safe by default.
+
+Do not permanently enable OpenHands, model calls, source writes, or code-writing tasks in the systemd service unless explicitly requested.
+
+Temporary service overrides must be removed after testing unless the user explicitly asks to keep them.
+
+After gated testing, clear relevant user-service environment variables:
+
+```bash
+systemctl --user unset-environment \
+  AGENT_MANAGER_ENABLE_OPENHANDS \
+  AGENT_MANAGER_AI_ENABLE_MODEL_CALLS \
+  AGENT_MANAGER_ENABLE_OVERNIGHT_OPENHANDS \
+  AGENT_MANAGER_OVERNIGHT_OPENHANDS_REQUEST_DIR \
+  AGENT_MANAGER_OVERNIGHT_OPENHANDS_CONFIRM_PROJECT \
+  AGENT_MANAGER_OPENHANDS_ENV_FILE
+```
+
+Then verify:
+
+```bash
+systemctl --user show-environment | grep -E 'AGENT_MANAGER_(ENABLE_OPENHANDS|ENABLE_OVERNIGHT_OPENHANDS|OVERNIGHT_OPENHANDS|OPENHANDS_ENV_FILE)' || echo "No gated OpenHands environment set"
+```
+
+## Git rules
+
+Check repository status before editing when practical:
+
+```bash
+git status --short
+git branch --show-current
+```
+
+Check status again before reporting.
+
+Preserve unrelated user changes.
+
+Do not commit unless explicitly asked.
+
+Do not push unless explicitly asked.
+
+Do not merge unless explicitly asked.
+
+Do not reset, clean, force-push, delete branches, delete worktrees, or discard changes unless explicitly asked.
+
+When asked to commit, include only files relevant to the requested task.
+
+## Reporting rules
+
+Final reports must include:
+
+```text
+files changed
+behavior changed
+validation commands run
+validation results
+run artifact paths when relevant
+safety status when relevant
+anything not run or not verified
+known risks or follow-up work
+recommended next action
+```
+
+Be explicit about failures, blocked work, pre-existing issues, or unverified assumptions.
+
