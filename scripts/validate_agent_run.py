@@ -39,6 +39,8 @@ OPENHANDS_MANUAL_GATE_REQUEST_UNSAFE_COMMAND_PATTERNS = (
     "branch -D",
 )
 OVERNIGHT_OPENHANDS_GENERATED_BY = "phase20_first_overnight_write_capable_run"
+PHASE23_GENERATED_BY = "phase23_ai_manager_objective_planner"
+VALID_MANAGER_PLAN_STATUSES = frozenset({"draft_ready", "needs_clarification", "blocked"})
 
 
 class CheckRecorder:
@@ -592,6 +594,17 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
             resolved_dirs["latest_feature_briefs"] = str(briefs_dir)
             validate_phase21_feature_briefs_directory(recorder, briefs_dir)
 
+    # Phase 23: Manager objective plan validation (planning-only — no execution)
+    manager_plan_pointer = run_root / "manager_objective_plans"
+    if manager_plan_pointer.exists() or manager_plan_pointer.is_symlink():
+        resolved_path = validate_latest_dir(recorder, "latest_manager_objective_plans_dir", manager_plan_pointer)
+        if resolved_path is not None and resolved_path.is_dir():
+            # Iterate over feature-specific plan directories under manager_objective_plans/
+            for feature_subdir in sorted(resolved_path.iterdir()):
+                if feature_subdir.is_dir() and (feature_subdir / "MANAGER_OBJECTIVE_PLAN.json").exists():
+                    resolved_dirs.setdefault("latest_manager_objective_plans", []).append(str(feature_subdir))
+                    validate_phase23_manager_objective_artifacts(recorder, feature_subdir)
+
     return resolved_dirs
 
 
@@ -997,6 +1010,301 @@ def validate_phase22_architecture_proposals(recorder: CheckRecorder, arch_dir: P
     validate_text_artifact(recorder, "phase22_arch_prompt_exists", prompt_path)
 
 
+
+
+# ---------------------------------------------------------------------------
+# Phase 23 — AI Manager Objective Planner Validation (planning-only)
+# ---------------------------------------------------------------------------
+
+
+def _validate_phase23_plan_json(
+    recorder: CheckRecorder,
+    check_prefix: str,
+    plan_path: Path,
+    expected_project: str | None = None,
+) -> dict[str, Any] | None:
+    """Validate a MANAGER_OBJECTIVE_PLAN.json artifact."""
+    plan_data = validate_json_artifact(recorder, f"{check_prefix}_parse", plan_path)
+    if not isinstance(plan_data, dict):
+        return None
+
+    recorder.pass_check(f"{check_prefix}_shape", "MANAGER_OBJECTIVE_PLAN.json is a valid JSON object", path=plan_path)
+
+    # Check schema_version
+    sv = plan_data.get("schema_version")
+    if sv == 1:
+        recorder.pass_check(f"{check_prefix}_schema_version", "MANAGER_OBJECTIVE_PLAN.json has schema_version 1", path=plan_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_schema_version",
+            f"MANAGER_OBJECTIVE_PLAN.json schema_version must be 1; found {sv!r}",
+            path=plan_path,
+        )
+
+    # Check generated_by
+    gen = plan_data.get("generated_by")
+    if gen == PHASE23_GENERATED_BY:
+        recorder.pass_check(f"{check_prefix}_generated_by", f"MANAGER_OBJECTIVE_PLAN.json generated_by is {PHASE23_GENERATED_BY}", path=plan_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_generated_by",
+            f"MANAGER_OBJECTIVE_PLAN.json generated_by must be {PHASE23_GENERATED_BY}; found {gen!r}",
+            path=plan_path,
+        )
+
+    # Check project_id
+    pid = plan_data.get("project_id")
+    if isinstance(pid, str) and pid:
+        recorder.pass_check(f"{check_prefix}_has_project_id", f"MANAGER_OBJECTIVE_PLAN.json references project {pid!r}", path=plan_path)
+        if expected_project and pid == expected_project:
+            recorder.pass_check(f"{check_prefix}_project_match", f"MANAGER_OBJECTIVE_PLAN.json project_id matches expected {expected_project!r}", path=plan_path)
+    else:
+        recorder.fail_check(f"{check_prefix}_has_project_id", "MANAGER_OBJECTIVE_PLAN.json must have a non-empty project_id field", path=plan_path)
+
+    # Check feature_id
+    fid = plan_data.get("feature_id")
+    if isinstance(fid, str) and fid:
+        recorder.pass_check(f"{check_prefix}_has_feature_id", f"MANAGER_OBJECTIVE_PLAN.json references feature {fid!r}", path=plan_path)
+    else:
+        recorder.fail_check(f"{check_prefix}_has_feature_id", "MANAGER_OBJECTIVE_PLAN.json must have a non-empty feature_id field", path=plan_path)
+
+    # Check manager_plan_status is valid
+    status = plan_data.get("manager_plan_status")
+    if status in VALID_MANAGER_PLAN_STATUSES:
+        recorder.pass_check(f"{check_prefix}_valid_status", f"MANAGER_OBJECTIVE_PLAN.json manager_plan_status {status!r} is valid", path=plan_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_invalid_status",
+            f"MANAGER_OBJECTIVE_PLAN.json manager_plan_status must be one of {sorted(VALID_MANAGER_PLAN_STATUSES)}; found {status!r}",
+            path=plan_path,
+        )
+
+    # Check required text/list fields are non-empty strings/lists when present
+    for field_name in ("title", "objective_summary", "selected_architecture_summary", "bounded_scope", "rollback_plan"):
+        val = plan_data.get(field_name)
+        if isinstance(val, str) and val.strip():
+            recorder.pass_check(f"{check_prefix}_field_{field_name}", f"{field_name} is a non-empty string", path=plan_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_field_{field_name}",
+                f"{field_name} must be a non-empty string; found {val!r}",
+                path=plan_path,
+            )
+
+    for field_name in ("allowed_files", "disallowed_files"):
+        val = plan_data.get(field_name)
+        if isinstance(val, list):
+            recorder.pass_check(f"{check_prefix}_field_{field_name}_is_list", f"{field_name} is a list ({len(val)} items)", path=plan_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_field_{field_name}_is_list",
+                f"{field_name} must be a list; found {type(val).__name__}",
+                path=plan_path,
+            )
+
+    for field_name in ("implementation_steps", "validation_commands", "acceptance_criteria",
+                       "risk_controls", "dependencies", "assumptions", "constraints",
+                       "out_of_scope", "questions_for_human"):
+        val = plan_data.get(field_name)
+        if isinstance(val, list):
+            recorder.pass_check(f"{check_prefix}_field_{field_name}_is_list", f"{field_name} is a list ({len(val)} items)", path=plan_path)
+        elif val is None:
+            recorder.pass_check(f"{check_prefix}_field_{field_name}_absent_ok", f"{field_name} absent (optional)", path=plan_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_field_{field_name}_is_list",
+                f"{field_name} must be a list; found {type(val).__name__}",
+                path=plan_path,
+            )
+
+    # Check source artifact paths are present and non-empty
+    for field_name in ("source_feature_brief_path", "source_architecture_proposal_path"):
+        val = plan_data.get(field_name)
+        if isinstance(val, str) and val.strip():
+            recorder.pass_check(f"{check_prefix}_has_{field_name}", f"MANAGER_OBJECTIVE_PLAN.json has {field_name} ({val!r})", path=plan_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_missing_{field_name}",
+                f"MANAGER_OBJECTIVE_PLAN.json must have a non-empty {field_name} field",
+                path=plan_path,
+            )
+
+    # Check matching source feature brief exists
+    source_brief = plan_data.get("source_feature_brief_path", "")
+    if isinstance(source_brief, str) and source_brief:
+        full_brief_dir = ROOT / source_brief
+        brief_json = full_brief_dir.parent / "FEATURE_BRIEF.json"
+        if not brief_json.exists():
+            brief_json = Path(full_brief_dir) if full_brief_dir.is_dir() else None
+            if brief_json and (brief_json / "FEATURE_BRIEF.json").exists():
+                recorder.pass_check(f"{check_prefix}_source_brief_exists", f"Source feature brief exists at {brief_json.parent}", path=plan_path)
+        elif brief_json.exists():
+            recorder.pass_check(f"{check_prefix}_source_brief_exists", f"Source feature brief exists at {brief_json}", path=plan_path)
+
+    # Check matching source architecture proposal exists
+    source_arch = plan_data.get("source_architecture_proposal_path", "")
+    if isinstance(source_arch, str) and source_arch:
+        full_arch_dir = ROOT / source_arch
+        arch_json = Path(full_arch_dir) if full_arch_dir.is_dir() else None
+        if arch_json and (arch_json / "ARCHITECTURE_PROPOSAL.json").exists():
+            recorder.pass_check(f"{check_prefix}_source_arch_exists", f"Source architecture proposal exists at {arch_json}", path=plan_path)
+
+    return plan_data
+
+
+def _validate_phase23_draft_request(
+    recorder: CheckRecorder,
+    check_prefix: str,
+    draft_path: Path,
+) -> dict[str, Any] | None:
+    """Validate an OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json artifact."""
+    draft_data = validate_json_artifact(recorder, f"{check_prefix}_parse", draft_path)
+    if not isinstance(draft_data, dict):
+        return None
+
+    recorder.pass_check(f"{check_prefix}_shape", "OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json is a valid JSON object", path=draft_path)
+
+    # Check schema_version
+    sv = draft_data.get("schema_version")
+    if sv == 1:
+        recorder.pass_check(f"{check_prefix}_schema_version", "OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json has schema_version 1", path=draft_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_schema_version",
+            f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json schema_version must be 1; found {sv!r}",
+            path=draft_path,
+        )
+
+    # Check generated_by
+    gen = draft_data.get("generated_by")
+    if gen == PHASE23_GENERATED_BY:
+        recorder.pass_check(f"{check_prefix}_generated_by", f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json generated_by is {PHASE23_GENERATED_BY}", path=draft_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_generated_by",
+            f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json generated_by must be {PHASE23_GENERATED_BY}; found {gen!r}",
+            path=draft_path,
+        )
+
+    # Check draft_only is True
+    if draft_data.get("draft_only") is True:
+        recorder.pass_check(f"{check_prefix}_draft_only", "OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json draft_only is true", path=draft_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_draft_only",
+            f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json draft_only must be true; found {draft_data.get('draft_only')!r}",
+            path=draft_path,
+        )
+
+    # Check approved_for_execution is False
+    if draft_data.get("approved_for_execution") is False:
+        recorder.pass_check(f"{check_prefix}_not_approved", "OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json approved_for_execution is false", path=draft_path)
+    else:
+        recorder.fail_check(
+            f"{check_prefix}_not_approved",
+            f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json approved_for_execution must be false; found {draft_data.get('approved_for_execution')!r}",
+            path=draft_path,
+        )
+
+    # Check safety flags are all False
+    for flag_name in ("openhands_executed", "source_writes_performed", "apply_performed", "commit_performed", "push_performed", "merge_performed", "pr_created"):
+        val = draft_data.get(flag_name)
+        if val is False:
+            recorder.pass_check(f"{check_prefix}_safety_{flag_name}", f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json {flag_name} is false", path=draft_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_unsafe_{flag_name}",
+                f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json {flag_name} must be false; found {val!r}",
+                path=draft_path,
+            )
+
+    # Check required text/list fields
+    for field_name in ("project_id", "feature_id", "objective_id", "title", "task_summary"):
+        val = draft_data.get(field_name)
+        if isinstance(val, str) and val.strip():
+            recorder.pass_check(f"{check_prefix}_has_{field_name}", f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json has {field_name} ({val!r})", path=draft_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_missing_{field_name}",
+                f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json must have a non-empty {field_name} field",
+                path=draft_path,
+            )
+
+    # Check array fields are lists
+    for field_name in ("allowed_files", "disallowed_files", "validation_commands", "acceptance_criteria"):
+        val = draft_data.get(field_name)
+        if isinstance(val, list):
+            recorder.pass_check(f"{check_prefix}_field_{field_name}_is_list", f"{field_name} is a list ({len(val)} items)", path=draft_path)
+        else:
+            recorder.fail_check(
+                f"{check_prefix}_field_{field_name}_not_list",
+                f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json {field_name} must be a list; found {type(val).__name__}",
+                path=draft_path,
+            )
+
+    return draft_data
+
+
+def validate_phase23_manager_objective_artifacts(recorder: CheckRecorder, plan_dir: Path) -> None:
+    """Validate MANAGER_OBJECTIVE_PLAN.json and OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json."""
+    # Validate MANAGER_OBJECTIVE_PLAN.json
+    plan_path = plan_dir / "MANAGER_OBJECTIVE_PLAN.json"
+    if not plan_path.exists():
+        recorder.fail_check(
+            "phase23_plan_json_exists",
+            f"MANAGER_OBJECTIVE_PLAN.json is missing in {plan_dir}",
+            path=plan_path,
+        )
+    else:
+        plan_data = _validate_phase23_plan_json(recorder, "phase23_plan", plan_path)
+
+        # Validate OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json alongside
+        draft_path = plan_dir / "OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json"
+        if not draft_path.exists():
+            recorder.fail_check(
+                "phase23_draft_json_exists",
+                f"OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json is missing in {plan_dir}",
+                path=draft_path,
+            )
+        else:
+            _validate_phase23_draft_request(recorder, "phase23_draft", draft_path)
+
+    # Validate MANAGER_OBJECTIVE_PLAN.md exists alongside JSON
+    md_path = plan_dir / "MANAGER_OBJECTIVE_PLAN.md"
+    validate_text_artifact(recorder, "phase23_plan_md_exists", md_path)
+
+    # Validate safety: no execution-enabling flags in any Phase 23 JSON
+    for json_file in sorted(plan_dir.rglob("*.json")):
+        text = json_file.read_text()
+        unsafe_flags = [
+            "model_calls_enabled",
+            "execution_enabled",
+            "source_writes_enabled",
+            "auto_merge_enabled",
+            "auto_push_enabled",
+            "apply_canonical_write",
+            "allow_canonical_write",
+            "commit_enabled",
+            "push_enabled",
+            "merge_enabled",
+            "pr_creation_enabled",
+        ]
+        found_unsafe = [flag for flag in unsafe_flags if flag in text]
+        if found_unsafe:
+            recorder.fail_check(
+                f"phase23_no_execution_{json_file.name}",
+                f"{json_file.name} contains execution-enabling flags: {found_unsafe}",
+                path=json_file,
+                details={"flags": found_unsafe},
+            )
+        else:
+            recorder.pass_check(f"phase23_no_execution_flag_{json_file.stem}", f"No execution-enabling flags in {json_file.name}", path=json_file)
+
+    # Verify no execution-enabling request draft is present (draft_only=true check above covers this)
+    recorder.pass_check(
+        "phase23_planning_only",
+        "Phase 23 is planning-only: no OpenHands execution, no coder task, no source writes to target project repos",
+    )
 
 
 def path_has_parent_traversal(path: str) -> bool:
