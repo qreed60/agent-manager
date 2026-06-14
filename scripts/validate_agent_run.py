@@ -808,6 +808,196 @@ def validate_phase21_no_execution_safety(recorder: CheckRecorder, resolved_dirs:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Phase 22 — AI Architecture Agent Validation
+# ---------------------------------------------------------------------------
+
+PHASE22_GENERATED_BY = "phase22_ai_architecture_agent"
+
+
+def validate_phase22_architecture_proposals(recorder: CheckRecorder, arch_dir: Path) -> None:
+    """Validate ARCHITECTURE_PROPOSAL.json and related artifacts in the architecture proposal directory."""
+    # Check for ARCHITECTURE_PROPOSAL.json
+    proposal_path = arch_dir / "ARCHITECTURE_PROPOSAL.json"
+    if not proposal_path.exists():
+        recorder.fail_check(
+            "phase22_arch_proposal_json_exists",
+            f"ARCHITECTURE_PROPOSAL.json is missing in {arch_dir}",
+            path=proposal_path,
+        )
+        return
+
+    proposal_data = validate_json_artifact(recorder, "phase22_arch_proposal_parse", proposal_path)
+    if not isinstance(proposal_data, dict):
+        recorder.fail_check("phase22_arch_proposal_shape", f"ARCHITECTURE_PROPOSAL.json must be a JSON object", path=proposal_path)
+        return
+
+    # Validate generated_by
+    gen = proposal_data.get("generated_by")
+    if gen == PHASE22_GENERATED_BY:
+        recorder.pass_check(
+            "phase22_arch_proposal_generated_by",
+            f"ARCHITECTURE_PROPOSAL.json generated_by is {PHASE22_GENERATED_BY}",
+            path=proposal_path,
+        )
+    else:
+        recorder.fail_check(
+            "phase22_arch_proposal_generated_by",
+            f"ARCHITECTURE_PROPOSAL.json generated_by must be {PHASE22_GENERATED_BY}; found {gen!r}",
+            path=proposal_path,
+        )
+
+    # Validate schema_version
+    sv = proposal_data.get("schema_version")
+    if sv == 1:
+        recorder.pass_check(
+            "phase22_arch_proposal_schema_version",
+            "ARCHITECTURE_PROPOSAL.json schema_version is 1",
+            path=proposal_path,
+        )
+    else:
+        recorder.fail_check(
+            "phase22_arch_proposal_schema_version",
+            f"ARCHITECTURE_PROPOSAL.json schema_version must be 1; found {sv!r}",
+            path=proposal_path,
+        )
+
+    # Validate architecture_status
+    status = proposal_data.get("architecture_status")
+    if status in {"proposal_ready", "needs_clarification", "blocked"}:
+        recorder.pass_check(
+            "phase22_arch_proposal_status",
+            f"ARCHITECTURE_PROPOSAL.json architecture_status is valid ({status})",
+            path=proposal_path,
+        )
+    else:
+        recorder.fail_check(
+            "phase22_arch_proposal_status",
+            f"ARCHITECTURE_PROPOSAL.json architecture_status must be one of proposal_ready, needs_clarification, blocked; found {status!r}",
+            path=proposal_path,
+        )
+
+    # Validate project_id and feature_id are present and non-empty
+    pid = proposal_data.get("project_id")
+    fid = proposal_data.get("feature_id")
+    if isinstance(pid, str) and pid:
+        recorder.pass_check(
+            "phase22_arch_proposal_project_id",
+            f"ARCHITECTURE_PROPOSAL.json project_id is present ({pid!r})",
+            path=proposal_path,
+        )
+    else:
+        recorder.fail_check(
+            "phase22_arch_proposal_project_id",
+            "ARCHITECTURE_PROPOSAL.json must have a non-empty project_id field",
+            path=proposal_path,
+        )
+
+    if isinstance(fid, str) and fid:
+        recorder.pass_check(
+            "phase22_arch_proposal_feature_id",
+            f"ARCHITECTURE_PROPOSAL.json feature_id is present ({fid!r})",
+            path=proposal_path,
+        )
+    else:
+        recorder.fail_check(
+            "phase22_arch_proposal_feature_id",
+            "ARCHITECTURE_PROPOSAL.json must have a non-empty feature_id field",
+            path=proposal_path,
+        )
+
+    # Validate safety flags in mock mode are all false
+    model_call_allowed = proposal_data.get("model_call_allowed")
+    model_called = proposal_data.get("model_called")
+    source_writes = proposal_data.get("source_writes_performed")
+    openhands_executed = proposal_data.get("openhands_executed")
+
+    if model_call_allowed is False:
+        recorder.pass_check("phase22_arch_safety_model_call_allowed", "model_call_allowed is false", path=proposal_path)
+    else:
+        recorder.fail_check(
+            "phase22_arch_safety_model_call_allowed",
+            f"model_call_allowed must be false; found {model_call_allowed!r}",
+            path=proposal_path,
+        )
+
+    if model_called is False:
+        recorder.pass_check("phase22_arch_safety_model_called", "model_called is false", path=proposal_path)
+    else:
+        recorder.fail_check(
+            "phase22_arch_safety_model_called",
+            f"model_called must be false; found {model_called!r}",
+            path=proposal_path,
+        )
+
+    if source_writes is False:
+        recorder.pass_check("phase22_arch_safety_source_writes", "source_writes_performed is false", path=proposal_path)
+    else:
+        recorder.fail_check(
+            "phase22_arch_safety_source_writes",
+            f"source_writes_performed must be false; found {source_writes!r}",
+            path=proposal_path,
+        )
+
+    if openhands_executed is False:
+        recorder.pass_check("phase22_arch_safety_openhands", "openhands_executed is false", path=proposal_path)
+    else:
+        recorder.fail_check(
+            "phase22_arch_safety_openhands",
+            f"openhands_executed must be false; found {openhands_executed!r}",
+            path=proposal_path,
+        )
+
+    # Validate required text fields are non-empty strings
+    for field_name in ("title", "problem_summary", "recommended_design", "test_strategy"):
+        val = proposal_data.get(field_name)
+        if isinstance(val, str) and val.strip():
+            recorder.pass_check(
+                f"phase22_arch_field_{field_name}",
+                f"{field_name} is a non-empty string",
+                path=proposal_path,
+            )
+        else:
+            recorder.fail_check(
+                f"phase22_arch_field_{field_name}",
+                f"{field_name} must be a non-empty string; found {val!r}",
+                path=proposal_path,
+            )
+
+    # Validate list fields are lists (or absent but allowed)
+    for field_name in ("alternative_designs", "files_likely_involved", "interfaces_and_contracts",
+                       "data_artifacts", "safety_risks", "implementation_sequence",
+                       "assumptions", "constraints", "out_of_scope", "questions_for_human"):
+        val = proposal_data.get(field_name)
+        if isinstance(val, list):
+            recorder.pass_check(
+                f"phase22_arch_field_{field_name}_is_list",
+                f"{field_name} is a list ({len(val)} items)",
+                path=proposal_path,
+            )
+        elif val is None:
+            recorder.pass_check(
+                f"phase22_arch_field_{field_name}_absent_ok",
+                f"{field_name} absent (optional)",
+                path=proposal_path,
+            )
+        else:
+            recorder.fail_check(
+                f"phase22_arch_field_{field_name}_is_list",
+                f"{field_name} must be a list; found {type(val).__name__}",
+                path=proposal_path,
+            )
+
+    # Check for ARCHITECTURE_PROPOSAL.md
+    md_path = arch_dir / "ARCHITECTURE_PROPOSAL.md"
+    validate_text_artifact(recorder, "phase22_arch_proposal_md_exists", md_path)
+
+    # Check for ARCHITECTURE_AGENT_PROMPT.md
+    prompt_path = arch_dir / "ARCHITECTURE_AGENT_PROMPT.md"
+    validate_text_artifact(recorder, "phase22_arch_prompt_exists", prompt_path)
+
+
+
 
 def path_has_parent_traversal(path: str) -> bool:
     return ".." in Path(path).parts
