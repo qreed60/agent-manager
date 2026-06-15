@@ -40,7 +40,14 @@ OPENHANDS_MANUAL_GATE_REQUEST_UNSAFE_COMMAND_PATTERNS = (
 )
 OVERNIGHT_OPENHANDS_GENERATED_BY = "phase20_first_overnight_write_capable_run"
 PHASE23_GENERATED_BY = "phase23_ai_manager_objective_planner"
+PHASE24_GENERATED_BY = "phase24_multi_project_planning_board"
 VALID_MANAGER_PLAN_STATUSES = frozenset({"draft_ready", "needs_clarification", "blocked"})
+
+# Phase 24 planning board paths
+PLANNING_BOARD_OUTPUT_DIR = ROOT / "runs" / "planning_board"
+GLOBAL_FEATURE_QUEUE_PATH = PLANNING_BOARD_OUTPUT_DIR / "GLOBAL_FEATURE_QUEUE.json"
+PROJECT_FEATURE_STATUS_PATH = PLANNING_BOARD_OUTPUT_DIR / "PROJECT_FEATURE_STATUS.json"
+AGENT_MANAGER_PLANNING_BOARD_MD = PLANNING_BOARD_OUTPUT_DIR / "AGENT_MANAGER_PLANNING_BOARD.md"
 
 
 class CheckRecorder:
@@ -604,6 +611,34 @@ def validate_run_artifacts(project_id: str, recorder: CheckRecorder, *, skip_orc
                 if feature_subdir.is_dir() and (feature_subdir / "MANAGER_OBJECTIVE_PLAN.json").exists():
                     resolved_dirs.setdefault("latest_manager_objective_plans", []).append(str(feature_subdir))
                     validate_phase23_manager_objective_artifacts(recorder, feature_subdir)
+
+    # Phase 24: Multi-Project Agent Planning Board validation (aggregation only — no execution)
+    if GLOBAL_FEATURE_QUEUE_PATH.exists():
+        validate_phase24_global_feature_queue(recorder)
+    else:
+        recorder.pass_check(
+            "phase24_global_feature_queue_optional",
+            "GLOBAL_FEATURE_QUEUE.json is absent; Phase 24 planning board not yet generated",
+            path=GLOBAL_FEATURE_QUEUE_PATH,
+        )
+
+    if PROJECT_FEATURE_STATUS_PATH.exists():
+        validate_phase24_project_feature_status(recorder)
+    else:
+        recorder.pass_check(
+            "phase24_project_feature_status_optional",
+            "PROJECT_FEATURE_STATUS.json is absent; Phase 24 planning board not yet generated",
+            path=PROJECT_FEATURE_STATUS_PATH,
+        )
+
+    if AGENT_MANAGER_PLANNING_BOARD_MD.exists():
+        validate_text_artifact(recorder, "phase24_planning_board_readable", AGENT_MANAGER_PLANNING_BOARD_MD)
+    else:
+        recorder.pass_check(
+            "phase24_planning_board_md_optional",
+            "AGENT_MANAGER_PLANNING_BOARD.md is absent; Phase 24 planning board not yet generated",
+            path=AGENT_MANAGER_PLANNING_BOARD_MD,
+        )
 
     return resolved_dirs
 
@@ -3159,6 +3194,320 @@ def validate_review_agent_artifacts(
                 path=review_dir / "REVIEW_AGENTS_SUMMARY.json",
                 details={"expected": sorted(expected_agents), "actual": sorted(actual_agents)},
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 24 Multi-Project Agent Planning Board Validation
+# ---------------------------------------------------------------------------
+
+PHASE24_VALID_FEATURE_STATUSES = frozenset({
+    "brief_only", "needs_clarification", "ready_for_architecture",
+    "architecture_ready", "manager_plan_ready", "ready_for_human_review",
+    "blocked", "archived",
+})
+PHASE24_VALID_ARCHITECTURE_STATUSES = frozenset({"none", "proposal_ready", "needs_clarification", "blocked"})
+PHASE24_VALID_MANAGER_PLAN_STATUSES = frozenset({"none", "draft_ready", "needs_clarification", "blocked"})
+PHASE24_VALID_RISK_LEVELS = frozenset({"low", "medium", "high"})
+PHASE24_RECOMMENDED_ACTIONS = frozenset({
+    "missing_feature_brief", "clarify_feature_brief",
+    "run_architecture_agent_mock_or_gated", "clarify_architecture",
+    "run_manager_objective_planner_mock_or_gated", "clarify_manager_plan",
+    "review_openhands_manual_gate_draft", "resolve_blocker",
+    "monitor_or_archive",
+})
+
+
+def _validate_phase24_safety_summary(data: dict[str, Any], recorder: CheckRecorder, prefix: str) -> None:
+    """Validate that Phase 24 safety summary indicates no execution."""
+    safety = data.get("safety_summary")
+    if not isinstance(safety, dict):
+        recorder.fail_check(f"{prefix}_missing_safety_summary", "Missing or invalid safety_summary in artifact", path=None)
+        return
+
+    required_flags = [
+        "source_writes_performed", "openhands_executed", "coder_task_executed",
+        "apply_performed", "commit_performed", "push_performed",
+        "merge_performed", "pr_created",
+    ]
+    for flag in required_flags:
+        val = safety.get(flag)
+        if val is not False:
+            recorder.fail_check(
+                f"{prefix}_safety_flag_{flag}",
+                f"Phase 24 artifact must have {flag}=false; got {val!r}",
+                details={"actual": val},
+            )
+        else:
+            recorder.pass_check(f"{prefix}_safety_ok", f"safety flag {flag} is False")
+
+
+def validate_phase24_global_feature_queue(recorder: CheckRecorder) -> None:
+    """Validate GLOBAL_FEATURE_QUEUE.json for Phase 24."""
+    path = GLOBAL_FEATURE_QUEUE_PATH
+
+    # Check file exists and is valid JSON
+    data, err = load_json_file(path)
+    if err or data is None:
+        recorder.fail_check("phase24_global_queue_parse", f"GLOBAL_FEATURE_QUEUE.json parse error: {err}", path=path)
+        return
+    recorder.pass_check("phase24_global_queue_parse", "GLOBAL_FEATURE_QUEUE.json is valid JSON", path=path)
+
+    if not isinstance(data, dict):
+        recorder.fail_check("phase24_global_queue_shape", "GLOBAL_FEATURE_QUEUE.json must be a JSON object", path=path)
+        return
+
+    # Check schema_version
+    sv = data.get("schema_version")
+    if sv != 1:
+        recorder.fail_check("phase24_global_queue_schema_version", f"Expected schema_version=1; got {sv!r}", path=path)
+    else:
+        recorder.pass_check("phase24_global_queue_schema_version", "schema_version is 1")
+
+    # Check generated_by
+    gb = data.get("generated_by")
+    if gb != PHASE24_GENERATED_BY:
+        recorder.fail_check(
+            "phase24_global_queue_generated_by",
+            f"Expected generated_by={PHASE24_GENERATED_BY!r}; got {gb!r}",
+            path=path, details={"actual": gb},
+        )
+    else:
+        recorder.pass_check("phase24_global_queue_generated_by", "generated_by is correct")
+
+    # Check created_utc
+    cu = data.get("created_utc")
+    if not isinstance(cu, str) or not cu:
+        recorder.fail_check("phase24_global_queue_created_utc", "Missing or invalid created_utc", path=path)
+    else:
+        recorder.pass_check("phase24_global_queue_created_utc", f"created_utc={cu!r}")
+
+    # Check projects_scanned is a non-empty array of strings
+    ps = data.get("projects_scanned")
+    if not isinstance(ps, list) or len(ps) < 1:
+        recorder.fail_check("phase24_global_queue_projects_scanned", "projects_scanned must be a non-empty array", path=path)
+    else:
+        all_strings = all(isinstance(p, str) and p for p in ps)
+        if not all_strings:
+            recorder.fail_check("phase24_global_queue_projects_scanned_types", "All projects_scanned entries must be non-empty strings", path=path)
+        else:
+            recorder.pass_check("phase24_global_queue_projects_scanned", f"projects_scanned has {len(ps)} valid project_ids")
+
+    # Check total_features matches features array length
+    tf = data.get("total_features")
+    feats = data.get("features")
+    if not isinstance(feats, list):
+        recorder.fail_check("phase24_global_queue_features_array", "features must be an array", path=path)
+        recorder.pass_check("phase24_global_queue_total_features_match", f"total_features={tf}")
+    else:
+        expected = len(feats)
+        if tf != expected:
+            recorder.fail_check(
+                "phase24_global_queue_total_features_mismatch",
+                f"total_features={tf} does not match features array length={expected}",
+                path=path, details={"total_features": tf, "actual_length": expected},
+            )
+        else:
+            recorder.pass_check("phase24_global_queue_total_features_match", f"total_features={tf} matches")
+
+    # Validate each feature entry
+    valid_statuses = PHASE24_VALID_FEATURE_STATUSES
+    valid_arch_statuses = PHASE24_VALID_ARCHITECTURE_STATUSES
+    valid_mgr_statuses = PHASE24_VALID_MANAGER_PLAN_STATUSES
+    valid_risk = PHASE24_VALID_RISK_LEVELS
+    valid_actions = PHASE24_RECOMMENDED_ACTIONS
+
+    feature_errors = 0
+    for idx, feat in enumerate(feats or []):
+        prefix = f"phase24_feature_{idx}"
+        if not isinstance(feat, dict):
+            recorder.fail_check(f"{prefix}_is_dict", f"Feature entry {idx} must be an object", path=path)
+            feature_errors += 1
+            continue
+
+        # Required: project_id and feature_id
+        pid = feat.get("project_id")
+        fid = feat.get("feature_id")
+        if not isinstance(pid, str) or not pid:
+            recorder.fail_check(f"{prefix}_missing_project_id", "Missing or invalid project_id", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_has_project_id", f"project_id={pid!r}")
+
+        if not isinstance(fid, str) or not fid:
+            recorder.fail_check(f"{prefix}_missing_feature_id", "Missing or invalid feature_id", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_has_feature_id", f"feature_id={fid!r}")
+
+        # Validate boolean flags
+        for bool_field in ["has_feature_brief", "has_architecture_proposal", "has_manager_objective_plan",
+                           "has_openhands_manual_gate_request_draft", "ready_for_openhands_manual_gate", "blocked"]:
+            val = feat.get(bool_field)
+            if not isinstance(val, bool):
+                recorder.fail_check(f"{prefix}_bool_{bool_field}", f"Field {bool_field} must be boolean; got {type(val).__name__}", path=path)
+            else:
+                recorder.pass_check(f"{prefix}_bool_{bool_field}", f"{bool_field}={val}")
+
+        # Validate enum fields
+        fs = feat.get("feature_status")
+        if fs not in valid_statuses:
+            recorder.fail_check(f"{prefix}_invalid_feature_status", f"Invalid feature_status={fs!r}", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_valid_feature_status", f"feature_status={fs!r}")
+
+        rl = feat.get("risk_level")
+        if rl not in valid_risk:
+            recorder.fail_check(f"{prefix}_invalid_risk_level", f"Invalid risk_level={rl!r}", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_valid_risk_level", f"risk_level={rl!r}")
+
+        as_ = feat.get("architecture_status")
+        if as_ not in valid_arch_statuses:
+            recorder.fail_check(f"{prefix}_invalid_arch_status", f"Invalid architecture_status={as_!r}", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_valid_arch_status", f"architecture_status={as_!r}")
+
+        ms = feat.get("manager_plan_status")
+        if ms not in valid_mgr_statuses:
+            recorder.fail_check(f"{prefix}_invalid_mgr_status", f"Invalid manager_plan_status={ms!r}", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_valid_mgr_status", f"manager_plan_status={ms!r}")
+
+        rn = feat.get("recommended_next_action")
+        if rn not in valid_actions:
+            recorder.fail_check(f"{prefix}_invalid_action", f"Invalid recommended_next_action={rn!r}", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_valid_action", f"recommended_next_action={rn!r}")
+
+        # Validate latest_artifact_paths
+        paths = feat.get("latest_artifact_paths")
+        if not isinstance(paths, dict):
+            recorder.fail_check(f"{prefix}_invalid_paths", "latest_artifact_paths must be an object", path=path)
+        else:
+            # Check that paths are under central runs storage, NOT target repos
+            for pkey, pval in paths.items():
+                if pval is None or not isinstance(pval, str):
+                    continue
+                if any(indicator in pval for indicator in ["/mnt/projects/", "/home/qreed/projects/"]):
+                    recorder.fail_check(
+                        f"{prefix}_path_target_repo",
+                        f"Artifact path '{pkey}' points to target repo: {pval}",
+                        path=path, details={"key": pkey, "value": pval},
+                    )
+                else:
+                    recorder.pass_check(f"{prefix}_path_safe_{pkey}", f"path is under central storage")
+
+        if any(not isinstance(feat.get(bf), bool) for bf in ["has_feature_brief", "has_architecture_proposal"]):
+            feature_errors += 1
+
+    if feats and feature_errors == 0:
+        recorder.pass_check("phase24_all_features_validated", f"All {len(feats)} features passed validation")
+    elif not feats:
+        recorder.pass_check("phase24_no_features", "No features in queue (empty but valid)")
+
+    # Validate safety summary
+    _validate_phase24_safety_summary(data, recorder, "phase24_global_queue")
+
+
+def validate_phase24_project_feature_status(recorder: CheckRecorder) -> None:
+    """Validate PROJECT_FEATURE_STATUS.json for Phase 24."""
+    path = PROJECT_FEATURE_STATUS_PATH
+
+    data, err = load_json_file(path)
+    if err or data is None:
+        recorder.fail_check("phase24_project_status_parse", f"PROJECT_FEATURE_STATUS.json parse error: {err}", path=path)
+        return
+    recorder.pass_check("phase24_project_status_parse", "PROJECT_FEATURE_STATUS.json is valid JSON", path=path)
+
+    if not isinstance(data, dict):
+        recorder.fail_check("phase24_project_status_shape", "PROJECT_FEATURE_STATUS.json must be a JSON object", path=path)
+        return
+
+    # Check schema_version
+    sv = data.get("schema_version")
+    if sv != 1:
+        recorder.fail_check("phase24_project_status_schema_version", f"Expected schema_version=1; got {sv!r}", path=path)
+    else:
+        recorder.pass_check("phase24_project_status_schema_version", "schema_version is 1")
+
+    # Check generated_by
+    gb = data.get("generated_by")
+    if gb != PHASE24_GENERATED_BY:
+        recorder.fail_check(
+            "phase24_project_status_generated_by",
+            f"Expected generated_by={PHASE24_GENERATED_BY!r}; got {gb!r}",
+            path=path, details={"actual": gb},
+        )
+    else:
+        recorder.pass_check("phase24_project_status_generated_by", "generated_by is correct")
+
+    # Check created_utc
+    cu = data.get("created_utc")
+    if not isinstance(cu, str) or not cu:
+        recorder.fail_check("phase24_project_status_created_utc", "Missing or invalid created_utc", path=path)
+    else:
+        recorder.pass_check("phase24_project_status_created_utc", f"created_utc={cu!r}")
+
+    # Check projects array
+    projects = data.get("projects")
+    if not isinstance(projects, list) or len(projects) < 1:
+        recorder.fail_check("phase24_project_status_projects_array", "projects must be a non-empty array", path=path)
+        return
+
+    for idx, proj in enumerate(projects):
+        prefix = f"phase24_proj_{idx}"
+        if not isinstance(proj, dict):
+            recorder.fail_check(f"{prefix}_is_dict", f"Project entry {idx} must be an object", path=path)
+            continue
+
+        pid = proj.get("project_id")
+        pname = proj.get("project_name")
+        registered = proj.get("registered")
+        if not isinstance(pid, str) or not pid:
+            recorder.fail_check(f"{prefix}_missing_project_id", "Missing project_id", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_has_project_id", f"project_id={pid!r}")
+
+        if not isinstance(pname, str) or not pname:
+            recorder.fail_check(f"{prefix}_missing_project_name", "Missing project_name", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_has_project_name", f"project_name={pname!r}")
+
+        if registered is not True and registered is not False:
+            recorder.fail_check(f"{prefix}_invalid_registered", f"registered must be boolean; got {type(registered).__name__}", path=path)
+        else:
+            recorder.pass_check(f"{prefix}_valid_registered", f"registered={registered}")
+
+        # Check integer counts
+        for count_field in ["total_features", "brief_only_count", "architecture_ready_count",
+                            "manager_plan_ready_count", "ready_for_human_review_count",
+                            "blocked_count", "missing_artifact_count"]:
+            val = proj.get(count_field)
+            if not isinstance(val, int) or isinstance(val, bool):
+                recorder.fail_check(f"{prefix}_invalid_{count_field}", f"Expected integer; got {type(val).__name__}", path=path)
+            elif val < 0:
+                recorder.fail_check(f"{prefix}_negative_{count_field}", f"Negative count: {val}", path=path)
+            else:
+                recorder.pass_check(f"{prefix}_valid_{count_field}", f"{count_field}={val}")
+
+        # Check latest_feature_ids is array of strings
+        lfi = proj.get("latest_feature_ids")
+        if not isinstance(lfi, list):
+            recorder.fail_check(f"{prefix}_invalid_latest_ids", "latest_feature_ids must be an array", path=path)
+        else:
+            all_strings = all(isinstance(x, str) for x in lfi)
+            if all_strings:
+                recorder.pass_check(f"{prefix}_valid_latest_ids", f"latest_feature_ids has {len(lfi)} entries")
+
+        # Check recommended_next_actions is array of strings
+        rna = proj.get("recommended_next_actions")
+        if not isinstance(rna, list):
+            recorder.fail_check(f"{prefix}_invalid_recommended_actions", "recommended_next_actions must be an array", path=path)
+        else:
+            all_strings = all(isinstance(x, str) for x in rna)
+            if all_strings:
+                recorder.pass_check(f"{prefix}_valid_recommended_actions", f"recommended_next_actions has {len(rna)} entries")
+
+    # Validate safety summary
+    _validate_phase24_safety_summary(data, recorder, "phase24_project_status")
 
 
 def build_markdown_report(report: dict[str, Any]) -> str:

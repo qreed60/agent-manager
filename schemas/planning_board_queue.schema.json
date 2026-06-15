@@ -1,0 +1,194 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GlobalFeatureQueue",
+  "description": "Multi-project global feature queue for the planning board. Aggregates Phase 21, 22, and 23 artifacts across registered projects. Deterministic, non-executing.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_by",
+    "created_utc",
+    "projects_scanned",
+    "total_features",
+    "features"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for this global feature queue format."
+    },
+    "generated_by": {
+      "type": "string",
+      "enum": ["phase24_multi_project_planning_board"],
+      "description": "Component that generated this artifact."
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^\\d{8}T\\d{6}Z$",
+      "description": "UTC timestamp in YYYYMMDDTHHMMSSZ format."
+    },
+    "projects_scanned": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "List of project_ids that were scanned for features."
+    },
+    "total_features": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total number of features aggregated across all projects."
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "feature_id",
+          "title",
+          "feature_status",
+          "risk_level",
+          "human_priority",
+          "target_project_area",
+          "has_feature_brief",
+          "has_architecture_proposal",
+          "has_manager_objective_plan",
+          "has_openhands_manual_gate_request_draft",
+          "architecture_status",
+          "manager_plan_status",
+          "ready_for_openhands_manual_gate",
+          "blocked",
+          "latest_artifact_paths",
+          "recommended_next_action"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Registered project identifier from configs/projects.json."
+          },
+          "feature_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Feature identifier matching the brief."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short title from the feature brief."
+          },
+          "feature_status": {
+            "type": "string",
+            "enum": ["brief_only", "needs_clarification", "ready_for_architecture", "architecture_ready", "manager_plan_ready", "ready_for_human_review", "blocked", "archived"],
+            "description": "Overall status of the feature across all phases."
+          },
+          "risk_level": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+            "description": "Risk level from the feature brief."
+          },
+          "human_priority": {
+            "oneOf": [
+              {"type": "integer"},
+              {"type": "number"}
+            ],
+            "minimum": 1,
+            "maximum": 5,
+            "description": "Human-priority score (1-5) from the feature brief."
+          },
+          "target_project_area": {
+            "type": "string",
+            "minLength": 0,
+            "description": "Target project area for the feature."
+          },
+          "has_feature_brief": {
+            "type": "boolean",
+            "description": "Whether a Phase 21 FEATURE_BRIEF.json exists."
+          },
+          "has_architecture_proposal": {
+            "type": "boolean",
+            "description": "Whether a Phase 22 ARCHITECTURE_PROPOSAL.json exists."
+          },
+          "has_manager_objective_plan": {
+            "type": "boolean",
+            "description": "Whether a Phase 23 MANAGER_OBJECTIVE_PLAN.json exists."
+          },
+          "has_openhands_manual_gate_request_draft": {
+            "type": "boolean",
+            "description": "Whether an OPENHANDS_MANUAL_GATE_REQUEST_DRAFT.json exists."
+          },
+          "architecture_status": {
+            "type": "string",
+            "enum": ["none", "proposal_ready", "needs_clarification", "blocked"],
+            "description": "Status of the architecture proposal (or 'none' if missing)."
+          },
+          "manager_plan_status": {
+            "type": "string",
+            "enum": ["none", "draft_ready", "needs_clarification", "blocked"],
+            "description": "Status of the manager objective plan (or 'none' if missing)."
+          },
+          "ready_for_openhands_manual_gate": {
+            "type": "boolean",
+            "description": "Whether the feature is ready for OpenHands manual gate review."
+          },
+          "blocked": {
+            "type": "boolean",
+            "description": "Whether the feature is currently blocked."
+          },
+          "blocked_reason": {
+            "type": "string",
+            "minLength": 0,
+            "description": "Reason for blocking if blocked is true."
+          },
+          "latest_artifact_paths": {
+            "type": "object",
+            "properties": {
+              "feature_brief_path": {"type": "string"},
+              "architecture_proposal_path": {"type": "string"},
+              "manager_objective_plan_path": {"type": "string"},
+              "openhands_manual_gate_draft_path": {"type": "string"}
+            },
+            "additionalProperties": false,
+            "description": "Paths to the latest artifacts for this feature."
+          },
+          "recommended_next_action": {
+            "type": "string",
+            "enum": ["missing_feature_brief", "clarify_feature_brief", "run_architecture_agent_mock_or_gated", "clarify_architecture", "run_manager_objective_planner_mock_or_gated", "clarify_manager_plan", "review_openhands_manual_gate_draft", "resolve_blocker", "monitor_or_archive"],
+            "description": "Recommended next action for this feature."
+          }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "uniqueItems": true,
+      "description": "Aggregated list of features from all scanned projects."
+    },
+    "safety_summary": {
+      "type": "object",
+      "required": [
+        "source_writes_performed",
+        "openhands_executed",
+        "coder_task_executed",
+        "apply_performed",
+        "commit_performed",
+        "push_performed",
+        "merge_performed",
+        "pr_created"
+      ],
+      "properties": {
+        "source_writes_performed": {"type": "boolean"},
+        "openhands_executed": {"type": "boolean"},
+        "coder_task_executed": {"type": "boolean"},
+        "apply_performed": {"type": "boolean"},
+        "commit_performed": {"type": "boolean"},
+        "push_performed": {"type": "boolean"},
+        "merge_performed": {"type": "boolean"},
+        "pr_created": {"type": "boolean"}
+      },
+      "additionalProperties": false,
+      "description": "Safety summary guaranteeing no execution was performed."
+    }
+  },
+  "additionalProperties": false
+}

@@ -32,47 +32,21 @@ Do not claim tests or validation passed unless the commands actually ran and com
 
 Run focused validation for the files you changed.
 
-## Mandatory MCP/LSP Tool Usage
+## MCP/LSP Tool Usage
 
-For coding tasks, MCP LSP tools must be used whenever a configured language server is available for the target language/project.
+When MCP tools are available, prefer the `code_lsp_*` tools for code intelligence before relying only on shell commands or text search.
 
-MCP LSP tools are the default source-code inspection path for:
+For Python work in this repository:
 
-* project/file discovery
-* diagnostics
-* symbols
-* definitions
-* references
-* hover/type information
-* call hierarchy
-* code actions
-* source-aware validation after edits
+1. Start or confirm the Python language server for the `agent-manager` project when needed.
+2. Use LSP diagnostics for the target file before editing.
+3. Use LSP symbols, references, hover, definitions, and code actions when they can reduce guesswork.
+4. After edits, rerun diagnostics on the changed files.
+5. Use shell validation as the final gate, including relevant unit tests and static checks.
 
-Before using terminal or file_editor for source-code inspection, use MCP LSP tools to establish the project context:
+For known Pyright issues, use MCP diagnostics first, then confirm with shell commands only after the LSP-reported issue is understood.
 
-1. `start_server` for the detected language and project.
-2. `get_server_status`.
-3. `get_project_files`.
-4. `get_project_symbols`.
-5. `get_diagnostics` for likely target files.
-
-A single MCP call does not satisfy this requirement.
-
-During analysis and implementation:
-
-* Use `get_symbols` before editing a source file.
-* Use `get_symbol_references`, `get_symbol_definitions`, `get_hover`, `get_call_hierarchy`, or `get_code_actions` when changing functions, classes, APIs, routes, schemas, services, adapters, or shared behavior.
-* Continue using MCP LSP tools whenever they can provide structural source information.
-* Do not rely only on `grep`, `rg`, `find`, `sed`, `cat`, or manual file reading when MCP LSP tools are available.
-
-After editing:
-
-* Run `get_diagnostics` again on every edited source file.
-* Report which MCP LSP tools were used and what they returned.
-
-Terminal commands, tests, linters, type checkers, and file inspection are still allowed, but they supplement MCP LSP usage; they do not replace it.
-
-If no MCP LSP server is configured or available for the target language/project, state that explicitly before falling back to shell-based inspection and validation.
+Do not ignore MCP diagnostics when they are available. If MCP tools fail or are unavailable, state that and fall back to shell-based inspection.
 
 
 Python syntax check examples:

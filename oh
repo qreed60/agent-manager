@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OPENHANDS_PROFILE="qwen36-agentmanager"
+PROJECT_PROFILE="agentmanager"
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+model="${1:-}"
+
+if [[ -n "$model" ]]; then
+  exec ohm \
+    --openhands-profile "$OPENHANDS_PROFILE" \
+    --project-profile "$PROJECT_PROFILE" \
+    --force-agents \
+    --model "$model" \
+    "$PROJECT_DIR"
+else
+  exec ohm \
+    --openhands-profile "$OPENHANDS_PROFILE" \
+    --project-profile "$PROJECT_PROFILE" \
+    --force-agents \
+    "$PROJECT_DIR"
+fi

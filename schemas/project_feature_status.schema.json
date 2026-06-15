@@ -1,0 +1,154 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectFeatureStatus",
+  "description": "Per-project feature status summary for the planning board. Aggregates Phase 21, 22, and 23 artifact counts per project. Deterministic, non-executing.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_by",
+    "created_utc",
+    "projects"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for this project feature status format."
+    },
+    "generated_by": {
+      "type": "string",
+      "enum": ["phase24_multi_project_planning_board"],
+      "description": "Component that generated this artifact."
+    },
+    "created_utc": {
+      "type": "string",
+      "pattern": "^\\d{8}T\\d{6}Z$",
+      "description": "UTC timestamp in YYYYMMDDTHHMMSSZ format."
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "project_name",
+          "registered",
+          "total_features",
+          "brief_only_count",
+          "architecture_ready_count",
+          "manager_plan_ready_count",
+          "ready_for_human_review_count",
+          "blocked_count",
+          "missing_artifact_count",
+          "latest_feature_ids",
+          "recommended_next_actions"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Registered project identifier from configs/projects.json."
+          },
+          "project_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable project name from configs/projects.json."
+          },
+          "registered": {
+            "type": "boolean",
+            "description": "Whether the project is registered in configs/projects.json."
+          },
+          "repo_path": {
+            "type": "string",
+            "minLength": 0,
+            "description": "Repository path from project config if available."
+          },
+          "server_state_dir": {
+            "type": "string",
+            "minLength": 0,
+            "description": "Server state directory from project config if available."
+          },
+          "total_features": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total number of features for this project."
+          },
+          "brief_only_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of features with only a feature brief (no architecture proposal)."
+          },
+          "architecture_ready_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of features ready for architecture planning."
+          },
+          "manager_plan_ready_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of features with manager objective plan ready."
+          },
+          "ready_for_human_review_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of features ready for human review."
+          },
+          "blocked_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of blocked features."
+          },
+          "missing_artifact_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of features missing required artifacts."
+          },
+          "latest_feature_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 0,
+            "uniqueItems": true,
+            "description": "Latest feature IDs for this project (sorted by created time descending)."
+          },
+          "recommended_next_actions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 0,
+            "uniqueItems": true,
+            "description": "Recommended next actions for this project."
+          }
+        },
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Per-project feature status entries."
+    },
+    "safety_summary": {
+      "type": "object",
+      "required": [
+        "source_writes_performed",
+        "openhands_executed",
+        "coder_task_executed",
+        "apply_performed",
+        "commit_performed",
+        "push_performed",
+        "merge_performed",
+        "pr_created"
+      ],
+      "properties": {
+        "source_writes_performed": {"type": "boolean"},
+        "openhands_executed": {"type": "boolean"},
+        "coder_task_executed": {"type": "boolean"},
+        "apply_performed": {"type": "boolean"},
+        "commit_performed": {"type": "boolean"},
+        "push_performed": {"type": "boolean"},
+        "merge_performed": {"type": "boolean"},
+        "pr_created": {"type": "boolean"}
+      },
+      "additionalProperties": false,
+      "description": "Safety summary guaranteeing no execution was performed."
+    }
+  },
+  "additionalProperties": false
+}
